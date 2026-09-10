@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-postgres
+  namespace: bigdata-dev
+  labels: {app: idma-postgres, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: idma-postgres}
+  template:
+    metadata:
+      labels: {app: idma-postgres}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          envFrom:
+            - secretRef: {name: idma-postgres-secret}
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "poc", "-d", "demo"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            exec: {command: ["pg_isready", "-U", "poc", "-d", "demo"]}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init-scripts
+          configMap: {name: idma-postgres-init}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-postgres
+  namespace: bigdata-dev
+  labels: {app: idma-postgres, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: ClusterIP
+  selector: {app: idma-postgres}
+  ports:
+    - port: 5432
+      targetPort: 5432

@@ -1,0 +1,48 @@
+apiVersion: v1
+data:
+  org-001-README.txt: |
+    Acme Retail (org-001) — internal file storage.
+
+    This bucket belongs to org-001 only. It is served by a MinIO user
+    (org001svc) whose IAM policy grants it access to org-001 alone — not
+    because nobody asked for org-002's data, but because org001svc's own
+    credentials structurally cannot reach it. See README.md's "Storage
+    isolation" section for how this differs from every other isolation
+    guarantee in this POC: it's enforced by MinIO's own IAM, not OPA.
+  org-001-notes-onboarding.md: |
+    # Acme Retail — Data Platform Onboarding
+
+    Welcome to Acme Retail's data platform. Your Trino access covers the
+    `sales` schema (and `hr` if you're in `grp_hr`); your Airflow access
+    covers `sales_etl`, `hr_payroll_sync`, or `customer_export` depending on
+    your grant. Ask a workspace admin if something looks missing — but it
+    will never be org-002's data, no matter who asks.
+  org-001-q1-sales-summary.csv: |
+    region,orders,revenue_usd
+    APAC,4,796.00
+    LATAM,1,149.00
+    EMEA,1,499.00
+  org-002-README.txt: |
+    Globex Logistics (org-002) — internal file storage.
+
+    This bucket belongs to org-002 only. It is served by a MinIO user
+    (org002svc) whose IAM policy grants it access to org-002 alone. Try
+    listing org-001's bucket with org002svc's credentials — MinIO returns
+    Access Denied, not "empty results": the boundary is enforced by the
+    storage layer itself, independent of Trino, Airflow, or OPA.
+  org-002-notes-onboarding.md: |
+    # Globex Logistics — Data Platform Onboarding
+
+    Welcome to Globex Logistics's data platform. Your Trino access covers
+    `org2_sales`; your Airflow access covers `org2_etl`. If you ever see
+    Acme Retail's `sales` schema or `sales_etl` Dag show up as accessible,
+    that's a bug — file it, don't use it.
+  org-002-q1-shipment-summary.csv: |
+    region,shipments,revenue_usd
+    APAC,1,89.00
+    EMEA,2,298.00
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: idma-minio-seed-files
+  namespace: bigdata-dev

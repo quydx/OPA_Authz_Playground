@@ -1,0 +1,32 @@
+# Secrets / credentials
+teamde-kubeconfig.yaml
+*.kubeconfig
+kubeconfig*.yaml
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LibreOffice/Office lock files
+.~lock.*#
+
+# Logs
+*.log

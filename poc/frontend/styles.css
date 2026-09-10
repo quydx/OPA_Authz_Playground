@@ -1,0 +1,265 @@
+:root {
+  --paper: #f1f3f6;
+  --paper-raised: #ffffff;
+  --ink: #171b21;
+  --ink-soft: #4b5568;
+  --ink-faint: #8189a0;
+  --line: #d8dde5;
+  --line-strong: #c0c7d2;
+  --accent: #3452e1;
+  --accent-soft: #e4e9fc;
+  --subject: #3452e1;
+  --resource: #0c8f82;
+  --role: #b8791e;
+  --role-soft: #fcefd9;
+  --allow: #1c8c5c;
+  --allow-soft: #e1f4eb;
+  --deny: #c4432e;
+  --deny-soft: #fbe7e2;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+h1, h2, h3 { margin: 0; font-family: "IBM Plex Sans Condensed", "IBM Plex Sans", sans-serif; }
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 18px 28px;
+  background: var(--paper-raised);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 14px; }
+.brand-mark { width: 10px; height: 34px; border-radius: 3px; background: var(--accent); display: inline-block; }
+.brand h1 { font-size: 1.3rem; font-weight: 700; }
+.brand p { margin: 2px 0 0; color: var(--ink-faint); font-size: 0.85rem; }
+
+.user-switch { display: flex; align-items: center; gap: 10px; }
+.user-switch label { font-size: 0.8rem; color: var(--ink-faint); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.user-switch select {
+  font-family: inherit; font-size: 0.95rem; padding: 8px 12px;
+  border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper-raised); color: var(--ink);
+}
+.groups-tag { font-size: 0.78rem; color: var(--subject); background: var(--accent-soft); padding: 4px 10px; border-radius: 999px; }
+.org-tag { font-size: 0.78rem; font-weight: 600; color: var(--role); background: var(--role-soft); padding: 4px 10px; border-radius: 999px; }
+
+/* tabs */
+.tabs {
+  display: flex; gap: 6px;
+  padding: 14px 28px 0;
+  max-width: 1320px; margin: 0 auto;
+}
+.tab-btn {
+  font-family: inherit; font-size: 0.9rem; font-weight: 600; color: var(--ink-faint);
+  background: transparent; border: 1px solid transparent; border-bottom: none;
+  padding: 10px 18px; border-radius: 8px 8px 0 0; cursor: pointer;
+}
+.tab-btn:hover { color: var(--ink); }
+.tab-btn.active {
+  color: var(--accent); background: var(--paper-raised);
+  border-color: var(--line); border-bottom-color: var(--paper-raised);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1.1fr 1.4fr;
+  grid-template-rows: auto auto;
+  gap: 20px;
+  padding: 24px 28px 40px;
+  max-width: 1320px;
+  margin: 0 auto;
+}
+/* `display: grid` above is an author rule, so it overrides the browser's
+   own `[hidden] { display: none }` UA rule regardless of specificity —
+   without this, a hidden .layout tab still renders as a visible grid. */
+.layout[hidden] { display: none; }
+.catalog-panel { grid-row: 1; }
+.result-panel { grid-row: 1; }
+.policy-panel { grid-column: 1 / -1; grid-row: 2; }
+
+#tab-airflow.layout { grid-template-columns: 1.2fr 1.3fr; grid-template-rows: auto; }
+.dags-panel { grid-row: 1; }
+.airflow-policy-panel { grid-row: 1; }
+
+#tab-storage.layout { grid-template-columns: 1fr 1.2fr; grid-template-rows: auto; }
+.storage-panel { grid-row: 1; }
+.storage-preview-panel { grid-row: 1; }
+
+.layout-single {
+  display: block;
+  padding: 24px 28px 40px;
+  max-width: 1320px;
+  margin: 0 auto;
+}
+/* same author-rule-beats-UA-stylesheet fix as .layout[hidden] above */
+.layout-single[hidden] { display: none; }
+
+.panel {
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-shadow: 0 1px 2px rgba(23,27,33,.04), 0 8px 24px -14px rgba(23,27,33,.12);
+}
+.panel h2 { font-size: 1.05rem; font-weight: 700; }
+.hint { color: var(--ink-faint); font-size: 0.85rem; margin: 6px 0 16px; }
+
+/* catalog tree */
+.catalog-tree { display: flex; flex-direction: column; gap: 14px; }
+.schema-block { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.schema-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: var(--paper); font-weight: 600;
+}
+.org-chip {
+  font-family: "IBM Plex Mono", monospace; font-weight: 600; font-size: 0.7rem;
+  color: var(--role); background: var(--role-soft); padding: 2px 8px; border-radius: 999px;
+  margin-left: 6px; vertical-align: middle;
+}
+.table-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 14px 9px 26px; border-top: 1px solid var(--line);
+  cursor: pointer; transition: background .1s;
+}
+.table-row:hover { background: var(--accent-soft); }
+.table-row .name { font-family: "IBM Plex Mono", monospace; font-size: 0.88rem; }
+
+.status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.status-dot.allow { background: var(--allow); }
+.status-dot.deny { background: var(--deny); }
+
+/* airflow dag list */
+.dag-list { display: flex; flex-direction: column; gap: 14px; }
+.dag-row { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.dag-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.dag-head .name { font-weight: 700; }
+.dag-id { font-size: 0.78rem; color: var(--ink-faint); }
+.dag-desc { margin: 4px 0 12px; color: var(--ink-soft); font-size: 0.85rem; }
+.perm-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.perm-chip {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.75rem; font-weight: 600;
+  padding: 4px 10px; border-radius: 999px; border: 1px solid transparent;
+}
+.perm-chip.allow { background: var(--allow-soft); color: var(--allow); border-color: var(--allow); }
+.perm-chip.deny { background: var(--deny-soft); color: var(--deny); border-color: var(--deny); }
+
+/* storage tab */
+.file-list { display: flex; flex-direction: column; gap: 8px; }
+.bucket-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.bucket-heading { font-size: 0.9rem; font-weight: 700; font-family: "IBM Plex Mono", monospace; }
+.hint-inline { font-family: "IBM Plex Sans", sans-serif; font-weight: 400; font-size: 0.75rem; color: var(--ink-faint); }
+.file-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 14px; border: 1px solid var(--line); border-radius: 8px;
+  cursor: pointer; transition: background .1s;
+}
+.file-row:hover { background: var(--accent-soft); }
+.file-row .name { font-family: "IBM Plex Mono", monospace; font-size: 0.85rem; }
+.file-row .size { font-size: 0.75rem; color: var(--ink-faint); }
+.file-preview {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.8rem; white-space: pre-wrap;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px 14px; max-height: 280px; overflow: auto; margin-bottom: 20px;
+}
+.cross-check-result {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.82rem;
+  padding: 10px 14px; border-radius: 8px; margin-top: 12px;
+}
+.cross-check-result.denied { background: var(--allow-soft); color: var(--allow); border: 1px solid var(--allow); }
+.cross-check-result.leaked { background: var(--deny-soft); color: var(--deny); border: 1px solid var(--deny); }
+
+/* services tab */
+.service-row { cursor: default; flex-wrap: wrap; gap: 6px 16px; }
+.service-row:hover { background: none; }
+.service-row .name { color: var(--accent); text-decoration: none; }
+.service-row .name:hover { text-decoration: underline; }
+.service-row strong { margin-right: 8px; }
+
+/* credentials tab */
+#credentials-table td:last-child { white-space: normal; max-width: 360px; color: var(--ink-soft); }
+
+/* result panel */
+.result-empty { color: var(--ink-faint); font-size: 0.9rem; padding: 20px 0; }
+.result-decision {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.85rem;
+  padding: 10px 14px; border-radius: 8px; margin-bottom: 14px;
+}
+.result-decision.allow { background: var(--allow-soft); color: var(--allow); border: 1px solid var(--allow); }
+.result-decision.deny { background: var(--deny-soft); color: var(--deny); border: 1px solid var(--deny); }
+.result-message { margin-top: 6px; font-family: "IBM Plex Sans", sans-serif; color: inherit; }
+
+.result-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+table.data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+table.data-table th, table.data-table td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.data-table th { background: var(--paper); font-weight: 600; color: var(--ink-soft); position: sticky; top: 0; }
+
+/* policy inspector */
+.policy-tables { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; margin-bottom: 24px; }
+.policy-tables-3 { grid-template-columns: repeat(3, 1fr); }
+.policy-tables h3 { font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: var(--ink-soft); }
+.tok { font-family: "IBM Plex Mono", monospace; font-weight: 700; padding: 1px 6px; border-radius: 4px; margin-right: 6px; }
+.tok-p { color: var(--accent); background: var(--accent-soft); }
+.tok-g { color: var(--subject); background: var(--accent-soft); }
+.tok-g2 { color: var(--resource); background: #e1f4f0; }
+.tok-org { color: var(--role); background: var(--role-soft); }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-family: "IBM Plex Mono", monospace; }
+table td { padding: 5px 8px; border-bottom: 1px solid var(--line); color: var(--ink-soft); }
+table tr:last-child td { border-bottom: none; }
+
+.grant-title { margin-top: 4px; }
+.grant-form { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.grant-form label { display: flex; flex-direction: column; gap: 6px; font-size: 0.78rem; color: var(--ink-faint); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.grant-form select, .grant-form input {
+  font-family: "IBM Plex Mono", monospace; font-size: 0.88rem; padding: 8px 10px;
+  border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper-raised); color: var(--ink); min-width: 180px;
+}
+.grant-form input:disabled { color: var(--ink-faint); background: var(--paper); }
+.grant-actions { display: flex; gap: 8px; }
+.btn { font-family: inherit; font-weight: 600; font-size: 0.85rem; padding: 9px 18px; border-radius: 8px; border: 1px solid transparent; cursor: pointer; }
+.btn-allow { background: var(--allow-soft); color: var(--allow); border-color: var(--allow); }
+.btn-allow:hover { background: var(--allow); color: #fff; }
+.btn-deny { background: var(--deny-soft); color: var(--deny); border-color: var(--deny); }
+.btn-deny:hover { background: var(--deny); color: #fff; }
+.grant-status { min-height: 1.2em; margin-top: 10px; font-size: 0.85rem; color: var(--ink-soft); }
+
+/* architecture tab */
+.arch-svg-wrap { width: 100%; overflow-x: auto; }
+.arch-svg-wrap svg { width: 100%; height: auto; min-width: 760px; display: block; }
+.arch-box { fill: var(--paper-raised); stroke: var(--line-strong); stroke-width: 1.5; }
+.arch-box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+.arch-box-minio { fill: var(--role-soft); stroke: var(--role); stroke-width: 2; }
+.arch-title { font-family: "IBM Plex Sans", sans-serif; font-weight: 700; font-size: 15px; fill: var(--ink); }
+.arch-caption { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; fill: var(--ink-faint); }
+.arch-label { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; fill: var(--ink-soft); }
+.arch-label-opa { fill: var(--accent); }
+.arch-label-minio { fill: var(--role); }
+.arch-footnote { margin-top: 14px; }
+.legend-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin: 0 2px -1px 0; }
+.legend-opa { background: var(--accent); }
+.legend-minio { background: var(--role); }
+.legend-plain { background: var(--ink-faint); }
+
+@media (max-width: 920px) {
+  .layout { grid-template-columns: 1fr; }
+  .catalog-panel, .result-panel, .policy-panel { grid-column: 1; }
+  .policy-tables { grid-template-columns: 1fr; }
+  #tab-airflow.layout { grid-template-columns: 1fr; }
+  .dags-panel, .airflow-policy-panel { grid-column: 1; }
+  #tab-storage.layout { grid-template-columns: 1fr; }
+  .storage-panel, .storage-preview-panel { grid-column: 1; }
+}

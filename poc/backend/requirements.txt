@@ -1,0 +1,8 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.12
+trino==0.339.0
+pydantic==2.13.5
+boto3==1.43.91
+kubernetes==31.0.0

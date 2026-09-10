@@ -1,0 +1,129 @@
+apiVersion: v1
+data:
+  01-create-authz-db.sql: |
+    -- The default POSTGRES_DB ("demo") holds the business data Trino queries.
+    -- Policy data (grants, group membership, resource tree, user attributes)
+    -- lives in its own database on the same instance — the durable system of
+    -- record that the backend reads/writes and mirrors into OPA on every
+    -- change.
+    CREATE DATABASE authz;
+  02-demo-data.sql: |
+    -- Sample business data, queried through Trino's postgresql connector.
+    -- Two schemas with different sensitivity, used to demonstrate resource-tree
+    -- authorization: a grant on "sales" or "hr" should reach every table below it.
+
+    CREATE SCHEMA IF NOT EXISTS sales;
+
+    CREATE TABLE sales.customers (
+        id      SERIAL PRIMARY KEY,
+        name    TEXT NOT NULL,
+        email   TEXT NOT NULL,
+        region  TEXT NOT NULL
+    );
+
+    CREATE TABLE sales.orders (
+        id           SERIAL PRIMARY KEY,
+        customer_id  INT REFERENCES sales.customers(id),
+        amount       NUMERIC(10, 2) NOT NULL,
+        order_date   DATE NOT NULL,
+        -- Denormalized from customers.region so the OPA row-filter policy can
+        -- express itself as a plain "region = '<caller's region>'" predicate.
+        region       TEXT NOT NULL
+    );
+
+    CREATE TABLE sales.products (
+        id     SERIAL PRIMARY KEY,
+        name   TEXT NOT NULL,
+        price  NUMERIC(10, 2) NOT NULL
+    );
+
+    INSERT INTO sales.customers (name, email, region) VALUES
+        ('Nguyen Van A', 'a.nguyen@example.com', 'APAC'),
+        ('Tran Thi B',   'b.tran@example.com',   'APAC'),
+        ('Carlos Mendez','c.mendez@example.com', 'LATAM'),
+        ('Priya Shah',   'p.shah@example.com',   'APAC'),
+        ('Emma Wilson',  'e.wilson@example.com', 'EMEA');
+
+    INSERT INTO sales.products (name, price) VALUES
+        ('Standard Plan', 49.00),
+        ('Pro Plan',      149.00),
+        ('Enterprise Add-on', 499.00);
+
+    -- customer 1, 2, 4 = APAC · customer 3 = LATAM · customer 5 = EMEA
+    INSERT INTO sales.orders (customer_id, amount, order_date, region) VALUES
+        (1, 149.00, '2026-01-12', 'APAC'),
+        (1, 499.00, '2026-03-02', 'APAC'),
+        (2, 49.00,  '2026-02-20', 'APAC'),
+        (3, 149.00, '2026-04-05', 'LATAM'),
+        (4, 49.00,  '2026-05-18', 'APAC'),
+        (5, 499.00, '2026-06-30', 'EMEA');
+
+    CREATE SCHEMA IF NOT EXISTS hr;
+
+    CREATE TABLE hr.employees (
+        id           SERIAL PRIMARY KEY,
+        name         TEXT NOT NULL,
+        department   TEXT NOT NULL,
+        hire_date    DATE NOT NULL
+    );
+
+    CREATE TABLE hr.salaries (
+        employee_id  INT REFERENCES hr.employees(id),
+        salary       NUMERIC(10, 2) NOT NULL,
+        currency     TEXT NOT NULL
+    );
+
+    INSERT INTO hr.employees (name, department, hire_date) VALUES
+        ('Le Thi C',    'Engineering', '2023-04-10'),
+        ('David Kim',   'Engineering', '2022-09-01'),
+        ('Fatima Noor', 'People Ops',  '2024-01-15');
+
+    INSERT INTO hr.salaries (employee_id, salary, currency) VALUES
+        (1, 2400.00, 'USD'),
+        (2, 3100.00, 'USD'),
+        (3, 2100.00, 'USD');
+  03-create-airflow-db.sql: |
+    -- Airflow's own metadata database (Dag runs, task instances, connections,
+    -- variables, ...) — kept on the same Postgres instance as `demo` and
+    -- `authz` for this POC, but its own database so nothing about how
+    -- Airflow stores its state overlaps with the authz system of record.
+    CREATE DATABASE airflow;
+  04-demo-data-org2.sql: |
+    -- A second organization's data, same shape as sales.* (see
+    -- 02-demo-data.sql) but a fully separate schema — org-002's own tenant,
+    -- used to demonstrate that organization is an isolation boundary
+    -- independent of table/schema grants, not just another resource in the
+    -- same tree. See opa/policies/authz.rego's same_org() check and
+    -- backend/app/seed.py's RESOURCE_ORG / DEMO_USERS org fields.
+
+    CREATE SCHEMA IF NOT EXISTS org2_sales;
+
+    CREATE TABLE org2_sales.customers (
+        id      SERIAL PRIMARY KEY,
+        name    TEXT NOT NULL,
+        email   TEXT NOT NULL,
+        region  TEXT NOT NULL
+    );
+
+    CREATE TABLE org2_sales.orders (
+        id           SERIAL PRIMARY KEY,
+        customer_id  INT REFERENCES org2_sales.customers(id),
+        amount       NUMERIC(10, 2) NOT NULL,
+        order_date   DATE NOT NULL,
+        region       TEXT NOT NULL
+    );
+
+    INSERT INTO org2_sales.customers (name, email, region) VALUES
+        ('Hiroshi Tanaka', 'h.tanaka@globex.example',  'APAC'),
+        ('Ingrid Larsson',  'i.larsson@globex.example', 'EMEA'),
+        ('Mateo Rossi',     'm.rossi@globex.example',   'EMEA');
+
+    INSERT INTO org2_sales.orders (customer_id, amount, order_date, region) VALUES
+        (1, 89.00,  '2026-02-01', 'APAC'),
+        (2, 259.00, '2026-03-14', 'EMEA'),
+        (3, 39.00,  '2026-04-22', 'EMEA');
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: idma-postgres-init
+  namespace: bigdata-dev

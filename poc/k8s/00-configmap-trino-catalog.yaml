@@ -1,0 +1,12 @@
+apiVersion: v1
+data:
+  postgres.properties: |
+    connector.name=postgresql
+    connection-url=jdbc:postgresql://idma-postgres:5432/demo
+    connection-user=poc
+    connection-password=pocpass
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: idma-trino-catalog
+  namespace: bigdata-dev

@@ -1,0 +1,88 @@
+# ServiceAccount + Role/RoleBinding grant the backend read-only access to
+# this namespace's own pods and their logs — nothing else. Used only by
+# airflow_client.py to read the Airflow apiserver pod's log buffer for
+# the Credentials tab's live demo passwords (see poc/backend/app/airflow_client.py).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idma-backend
+  namespace: bigdata-dev
+  labels: {app.kubernetes.io/part-of: idma-poc}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idma-backend-pod-log-reader
+  namespace: bigdata-dev
+  labels: {app.kubernetes.io/part-of: idma-poc}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idma-backend-pod-log-reader
+  namespace: bigdata-dev
+  labels: {app.kubernetes.io/part-of: idma-poc}
+subjects:
+  - kind: ServiceAccount
+    name: idma-backend
+    namespace: bigdata-dev
+roleRef:
+  kind: Role
+  name: idma-backend-pod-log-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-backend
+  namespace: bigdata-dev
+  labels: {app: idma-backend, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: idma-backend}
+  template:
+    metadata:
+      labels: {app: idma-backend}
+    spec:
+      serviceAccountName: idma-backend
+      imagePullSecrets:
+        - name: ai-registry
+      containers:
+        - name: backend
+          image: ai-repository.vnpt.vn/idma/idma-poc-backend:latest
+          env:
+            - {name: AUTHZ_DB_URL, value: "postgresql://poc:pocpass@idma-postgres:5432/authz"}
+            - {name: OPA_URL, value: "http://idma-opa:8181"}
+            - {name: TRINO_HOST, value: "idma-trino"}
+            - {name: TRINO_PORT, value: "8080"}
+            - {name: TRINO_CATALOG, value: "postgres"}
+            - {name: MINIO_ENDPOINT, value: "http://idma-minio:9000"}
+            - {name: K8S_NAMESPACE, value: "bigdata-dev"}
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: {path: /api/health, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "100m", memory: "128Mi"}
+            limits: {cpu: "500m", memory: "384Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-backend
+  namespace: bigdata-dev
+  labels: {app: idma-backend, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: NodePort
+  selector: {app: idma-backend}
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30801

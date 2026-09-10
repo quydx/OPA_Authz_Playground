@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-opa
+  namespace: bigdata-dev
+  labels: {app: idma-opa, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: idma-opa}
+  template:
+    metadata:
+      labels: {app: idma-opa}
+    spec:
+      containers:
+        - name: opa
+          image: openpolicyagent/opa:latest
+          args: ["run", "--server", "--addr", ":8181", "/policies"]
+          ports:
+            - containerPort: 8181
+          volumeMounts:
+            # Individual subPath mounts, not a whole-directory ConfigMap
+            # mount: a directory-style ConfigMap mount exposes its files
+            # through a symlink ("atomic writer") layer that OPA's
+            # directory loader walks recursively, finding the same file
+            # under multiple apparent paths (..data/, the timestamped
+            # dir, and the plain name) and failing with "multiple
+            # default rules" for what is actually one file. subPath
+            # mounts a real file with no symlink indirection.
+            - {name: policies, mountPath: /policies/authz.rego, subPath: authz.rego, readOnly: true}
+            - {name: policies, mountPath: /policies/app.rego, subPath: app.rego, readOnly: true}
+            - {name: policies, mountPath: /policies/trino.rego, subPath: trino.rego, readOnly: true}
+            - {name: policies, mountPath: /policies/airflow.rego, subPath: airflow.rego, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /health, port: 8181}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "250m", memory: "256Mi"}
+      volumes:
+        - name: policies
+          configMap: {name: idma-opa-policies}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-opa
+  namespace: bigdata-dev
+  labels: {app: idma-opa, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: ClusterIP
+  selector: {app: idma-opa}
+  ports:
+    - port: 8181
+      targetPort: 8181

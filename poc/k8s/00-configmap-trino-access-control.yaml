@@ -1,0 +1,14 @@
+apiVersion: v1
+data:
+  access-control.properties: |
+    access-control.name=opa
+    opa.policy.uri=http://idma-opa:8181/v1/data/trino/allow
+    opa.policy.row-filters-uri=http://idma-opa:8181/v1/data/trino/rowFilters
+    opa.policy.column-masking-uri=http://idma-opa:8181/v1/data/trino/columnMask
+    opa.log-requests=true
+    opa.log-responses=true
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: idma-trino-access-control
+  namespace: bigdata-dev

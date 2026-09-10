@@ -1,0 +1,105 @@
+apiVersion: v1
+data:
+  airflow.rego: "package airflow\n\n# Airflow's native check, called by opa_auth_manager
+    (see\n# airflow/plugins/opa_auth_manager) on every is_authorized_dag() —\n# viewing
+    a Dag, triggering a run, reading its code or logs. Same shape\n# as app.rego and
+    trino.rego: a thin wrapper around the one shared\n# authz.allow(), just reshaping
+    Airflow's (user, dag_id, action) input\n# into the (user, resource, action) triple
+    the other two already use.\n#\n# Dag resources are named \"airflow.dag.<dag_id>\"
+    in policy_data — see the\n# grp_data_eng / grp_hr / bob grants in backend/app/seed.py.
+    No separate\n# policy engine, no duplicated matching logic.\n#\n# Input: {\"user\":
+    \"alice\", \"dag_id\": \"sales_etl\", \"action\": \"trigger\"}\n\nimport data.authz\nimport
+    future.keywords.if\n\ndefault allow := false\n\nallow if {\n\tauthz.allow(input.user,
+    sprintf(\"airflow.dag.%s\", [input.dag_id]), input.action)\n}\n"
+  app.rego: "package app\n\n# The backend's own authorization check — same engine
+    and same policy\n# data as Trino's, just a plain (user, resource, action) input
+    shape\n# since we control both sides of this call.\n#\n# Input: {\"user\": \"alice\",
+    \"resource\": \"sales.customers\", \"action\": \"select\"}\n\nimport data.authz\nimport
+    future.keywords.if\n\ndefault allow := false\n\nallow if {\n\tauthz.allow(input.user,
+    input.resource, input.action)\n}\n"
+  authz.rego: "package authz\n\n# Shared authorization core, consumed by both app.rego
+    (the backend's own\n# check) and trino.rego (Trino's native check) — one policy
+    engine, two\n# enforcement points, no duplicated logic between them.\n#\n# `data.policy_data`
+    is not computed here — it's a plain document the\n# backend pushes into OPA's
+    store (PUT /v1/data/policy_data) after every\n# write to the authz Postgres database,
+    and once on every backend\n# startup. Postgres stays the durable system of record;
+    this is just its\n# live mirror inside OPA. If it's missing or stale (OPA just
+    restarted\n# and the backend hasn't pushed yet), every lookup below is undefined,\n#
+    which both consumers treat as deny — fail closed, not fail open.\n\nimport future.keywords.if\nimport
+    future.keywords.in\n\npolicies := data.policy_data.p          # [[sub, obj, act],
+    ...]\ngroups := data.policy_data.g            # [[user, group], ...]\nresource_tree
+    := data.policy_data.g2    # [[child, parent], ...]\nattributes := data.policy_data.attributes\nresource_org
+    := data.policy_data.resource_org  # {resource: org, ...} — schemas/dags only\n\n#
+    subject_matches: sub is the user itself, or a group the user belongs to.\nsubject_matches(user,
+    sub) if user == sub\n\nsubject_matches(user, sub) if [user, sub] in groups\n\n#
+    resource_matches: obj is the resource itself, or its direct parent in\n# the resource
+    tree (table -> schema). Rego disallows unbounded\n# self-recursion, so this is
+    a bounded one-hop check rather than a\n# general transitive closure — which is
+    fine as long as the tree stays\n# one level deep, exactly like the data it replaces
+    (Casbin's g2 rules\n# here were also ever only table -> schema, never deeper).
+    A deeper tree\n# would need either another explicit hop added below, or the backend\n#
+    pre-computing full ancestor chains before pushing policy_data, rather\n# than
+    Rego walking the tree itself.\nresource_matches(resource, obj) if resource ==
+    obj\n\nresource_matches(resource, obj) if {\n\tsome edge in resource_tree\n\tedge[0]
+    == resource\n\tedge[1] == obj\n}\n\n# org_of(resource): the organization a resource
+    belongs to — looked up\n# directly (schemas, Airflow Dags — the resource-tree
+    roots) or via one\n# hop up the resource tree (a table inherits its schema's org).
+    Same\n# bounded-one-hop shape as resource_matches, for the same reason: Rego\n#
+    doesn't allow unbounded self-recursion, and the tree is only ever one\n# level
+    deep here anyway.\norg_of(resource) = org if {\n\torg := resource_org[resource]\n}\n\norg_of(resource)
+    = org if {\n\tnot resource_org[resource]\n\tsome edge in resource_tree\n\tedge[0]
+    == resource\n\torg := resource_org[edge[1]]\n}\n\n# same_org: independent of any
+    grant below — a policy that matches\n# subject and resource still isn't enough
+    if the caller's organization\n# isn't the resource's organization. Undefined (denied)
+    if either side\n# is unknown, same fail-closed shape as everything else in this
+    file.\nsame_org(user, resource) if {\n\torg_of(resource) == attributes[user].org\n}\n\n#
+    allow(user, resource, action): true if some policy grants a matching\n# subject
+    a matching resource for this action, AND the caller's\n# organization is the resource's
+    organization. Same shape as the old\n# Casbin matcher: g(sub) && g2(obj) && act
+    == p.act — with organization\n# layered on as its own independent guarantee, the
+    same way Trino's row\n# filters and column masks apply independently of the table
+    grant.\nallow(user, resource, action) if {\n\tsome p in policies\n\tsubject_matches(user,
+    p[0])\n\tresource_matches(resource, p[1])\n\taction == p[2]\n\tsame_org(user,
+    resource)\n}\n"
+  trino.rego: "package trino\n\n# Trino's native access control. Three things happen
+    here, all applied by\n# Trino itself during query planning:\n#\n#   1. allow      —
+    table-level gate for SelectFromColumns, backed by the\n#                    same
+    policy data and the same authz.allow() logic the\n#                    backend
+    uses (see app.rego). This is what closes the\n#                    \"connect to
+    Trino directly and skip the backend\"\n#                    gap: whoever's asking,
+    Trino now asks the same\n#                    question the backend would have.\n#
+    \  2. rowFilters  — sales.orders restricted to the caller's own region,\n#                    regardless
+    of any table-level grant.\n#   3. columnMask  — hr.salaries.salary hidden unless
+    the caller is HR.\n#\n# Everything other than SelectFromColumns (browsing catalogs/schemas,\n#
+    connecting, etc.) stays open by default so Trino remains usable — this\n# policy
+    only gates the operation that actually reads data. One\n# consequence: `SHOW TABLES`
+    still lists table names a caller can't\n# SELECT from; closing that too would
+    mean wiring FilterTables/batch mode\n# as well, not done here.\n\nimport data.authz\nimport
+    future.keywords.if\n\ndefault allow := true\n\ncurrent_user := input.context.identity.user\n\ntable_resource
+    := input.action.resource.table\n\nresource_key := sprintf(\"%s.%s\", [table_resource.schemaName,
+    table_resource.tableName])\n\nis_select if input.action.operation == \"SelectFromColumns\"\n\n#
+    Fail CLOSED: if authz.allow doesn't positively return true — including\n# when
+    it's undefined because policy_data hasn't been pushed yet — this\n# denies. `not
+    <undefined>` evaluates to true in Rego, so an OPA/backend\n# outage denies table
+    reads instead of silently allowing them.\nallow := false if {\n\tis_select\n\tnot
+    authz.allow(current_user, resource_key, \"select\")\n}\n\n# ---------------------------------------------------------------------------\n#
+    Row filter: sales.orders is restricted to the caller's own region,\n# independent
+    of whatever table-level grant they have.\n# ---------------------------------------------------------------------------\n\nis_sales_orders
+    if {\n\ttable_resource.catalogName == \"postgres\"\n\ttable_resource.schemaName
+    == \"sales\"\n\ttable_resource.tableName == \"orders\"\n}\n\nrowFilters contains
+    {\"expression\": sprintf(\"region = '%s'\", [authz.attributes[current_user].region])}
+    if {\n\tis_sales_orders\n\tauthz.attributes[current_user]\n}\n\n# Unknown identity
+    querying sales.orders: fail closed, show nothing.\nrowFilters contains {\"expression\":
+    \"1 = 0\"} if {\n\tis_sales_orders\n\tnot authz.attributes[current_user]\n}\n\n#
+    ---------------------------------------------------------------------------\n#
+    Column mask: hr.salaries.salary is NULL for everyone except HR.\n# ---------------------------------------------------------------------------\n\ncolumn_resource
+    := input.action.resource.column\n\nis_hr_salary_column if {\n\tcolumn_resource.catalogName
+    == \"postgres\"\n\tcolumn_resource.schemaName == \"hr\"\n\tcolumn_resource.tableName
+    == \"salaries\"\n\tcolumn_resource.columnName == \"salary\"\n}\n\nis_hr if authz.attributes[current_user].hr
+    == true\n\ncolumnMask := {\"expression\": \"NULL\"} if {\n\tis_hr_salary_column\n\tnot
+    is_hr\n}\n"
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: idma-opa-policies
+  namespace: bigdata-dev

@@ -1,0 +1,103 @@
+apiVersion: v1
+data:
+  customer_export.py: |
+    """Demo DAG — direct (non-group) grant, same shape as bob's direct
+    sales.customers grant in Trino: bob can view this one DAG without being
+    in any group, granted per-DAG rather than inherited.
+    """
+    from datetime import datetime
+
+    from airflow.providers.standard.operators.empty import EmptyOperator
+    from airflow.sdk import DAG
+
+    with DAG(
+        dag_id="customer_export",
+        description="Exports sales.customers to the partner feed",
+        schedule=None,
+        start_date=datetime(2024, 1, 1),
+        catchup=False,
+        tags=["sales", "idma-demo"],
+    ) as dag:
+        build_export = EmptyOperator(task_id="build_export")
+        upload = EmptyOperator(task_id="upload_to_partner")
+
+        build_export >> upload
+  hr_payroll_sync.py: |
+    """Demo DAG — the sensitive one. Same isolation story as hr.salaries in
+    Trino: only grp_hr is granted anything on this DAG (see seed.py); alice
+    and bob, both outside grp_hr, get denied by OPA before they even see it
+    listed in the Airflow UI.
+    """
+    from datetime import datetime
+
+    from airflow.providers.standard.operators.empty import EmptyOperator
+    from airflow.sdk import DAG
+
+    with DAG(
+        dag_id="hr_payroll_sync",
+        description="Syncs payroll data into hr.salaries",
+        schedule=None,
+        start_date=datetime(2024, 1, 1),
+        catchup=False,
+        tags=["hr", "idma-demo"],
+    ) as dag:
+        fetch = EmptyOperator(task_id="fetch_payroll_feed")
+        reconcile = EmptyOperator(task_id="reconcile")
+        write = EmptyOperator(task_id="write_salaries")
+
+        fetch >> reconcile >> write
+  org2_etl.py: |
+    """Demo DAG — org-002's own ETL job. Same shape as sales_etl, deliberately
+    granted to the same group name (grp_data_eng) to demonstrate that
+    organization isolation holds even when a group grant would otherwise
+    reach across tenants — see backend/app/seed.py's comments on erin.
+    """
+    from datetime import datetime
+
+    from airflow.providers.standard.operators.empty import EmptyOperator
+    from airflow.sdk import DAG
+
+    with DAG(
+        dag_id="org2_etl",
+        description="Nightly load of org2_sales.orders from the source system",
+        schedule=None,
+        start_date=datetime(2024, 1, 1),
+        catchup=False,
+        tags=["org-002", "idma-demo"],
+    ) as dag:
+        extract = EmptyOperator(task_id="extract")
+        transform = EmptyOperator(task_id="transform")
+        load = EmptyOperator(task_id="load")
+
+        extract >> transform >> load
+  sales_etl.py: |
+    """Demo DAG — owned by data engineering, same resource sales.orders feeds.
+
+    Authorization for this DAG (who can view it, trigger it, see its logs or
+    its code) is decided by OPA via opa_auth_manager, not by anything in this
+    file — see opa/policies/airflow.rego and the grp_data_eng grants in
+    backend/app/seed.py.
+    """
+    from datetime import datetime
+
+    from airflow.providers.standard.operators.empty import EmptyOperator
+    from airflow.sdk import DAG
+
+    with DAG(
+        dag_id="sales_etl",
+        description="Nightly load of sales.orders from the source system",
+        schedule=None,
+        start_date=datetime(2024, 1, 1),
+        catchup=False,
+        tags=["sales", "idma-demo"],
+    ) as dag:
+        extract = EmptyOperator(task_id="extract")
+        transform = EmptyOperator(task_id="transform")
+        load = EmptyOperator(task_id="load")
+
+        extract >> transform >> load
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: idma-airflow-dags
+  namespace: bigdata-dev

@@ -1,0 +1,175 @@
+version: "3.8"
+
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:3.0.6
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # The whole point of this service: swap Airflow's own authorization
+    # engine for one that calls OPA — see airflow/plugins/opa_auth_manager.
+    AIRFLOW__CORE__AUTH_MANAGER: opa_auth_manager.auth_manager.OPAAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://poc:pocpass@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-apiserver:8080/execution/"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # opa_auth_manager still delegates non-Dag resources (connections,
+    # variables, pools, config) to SimpleAuthManager's role check — every
+    # demo user needs a role for those, even though Dag access itself is
+    # fully decided by OPA regardless of role.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "alice:USER,bob:USER,carol:USER,dave:VIEWER,erin:USER"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "false"
+    OPA_URL: http://opa:8181
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    opa:
+      condition: service_started
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: poc
+      POSTGRES_PASSWORD: pocpass
+      POSTGRES_DB: demo
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U poc -d demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--addr", ":8181", "/policies"]
+    volumes:
+      - ./opa/policies:/policies:ro
+    ports:
+      - "8181:8181"
+
+  trino:
+    image: trinodb/trino:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/access-control.properties:/etc/trino/access-control.properties:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opa:
+        condition: service_started
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: pocadmin
+      MINIO_ROOT_PASSWORD: pocadminpass
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: creates the org-001/org-002 buckets, a MinIO user per org
+  # scoped to its own bucket by IAM policy (not OPA — see README.md's
+  # "Storage isolation" section), and uploads the sample files. Re-running
+  # this against an already-provisioned MinIO is safe — every step in
+  # minio/init.sh either uses --ignore-existing or is idempotent by design.
+  minio-init:
+    image: minio/mc:latest
+    entrypoint: sh
+    command: ["/init.sh"]
+    environment:
+      MINIO_ROOT_USER: pocadmin
+      MINIO_ROOT_PASSWORD: pocadminpass
+    volumes:
+      - ./minio/init.sh:/init.sh:ro
+      - ./minio/seed-files:/seed-files:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build: ./backend
+    environment:
+      AUTHZ_DB_URL: postgresql://poc:pocpass@postgres:5432/authz
+      OPA_URL: http://opa:8181
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_CATALOG: postgres
+      MINIO_ENDPOINT: http://minio:9000
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opa:
+        condition: service_started
+      trino:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command: ["-c", "airflow db migrate"]
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8082:8080"
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  airflow-logs:
+  miniodata:
