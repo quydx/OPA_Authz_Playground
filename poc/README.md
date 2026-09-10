@@ -1,4 +1,4 @@
-# IDMA Access Control — Minimal POC
+# OPA Access Control — Minimal POC
 
 A trimmed-down, runnable version of the IDMA authorization model: **Trino +
 Airflow + Postgres + OPA + MinIO**, with a FastAPI backend and a small
