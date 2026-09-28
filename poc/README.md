@@ -1,18 +1,21 @@
 # IDMA Access Control — Minimal POC
 
 A trimmed-down, runnable version of the IDMA authorization model: **Trino +
-Airflow + Postgres + OPA + MinIO**, with a FastAPI backend and a small
-static frontend to drive it. One policy engine (OPA), backed by one system
-of record (a Postgres `authz` database), enforced at **three independent
-points**:
+Airflow + Postgres + OPA + MinIO**, with **Keycloak** as the authentication
+service, a FastAPI backend, and a small static frontend to drive it. One
+policy engine (OPA), backed by one system of record (a Postgres `authz`
+database), enforced at **three independent points**:
 
-- **The backend** — a plain `(user, resource, action)` check before it
-  opens a Trino connection at all.
-- **Trino itself** — the same policy data, natively, during query
-  planning: table-level allow/deny, column masking, and row filtering.
-  This is what makes the second point matter — it applies to *any* client
-  that reaches Trino, not just traffic that happens to go through the
-  backend.
+- **The backend** — every `/api/*` route requires a valid Keycloak-issued
+  JWT (see "Authentication" below); the caller's identity comes from that
+  token, never from a client-supplied parameter. A plain `(user, resource,
+  action)` OPA check runs before the backend opens a Trino connection.
+- **Trino itself** — authenticates the caller's JWT itself (its own
+  `http-server.authentication.type=JWT`, not a reverse proxy), then
+  applies the same policy data natively during query planning:
+  table-level allow/deny, column masking, and row filtering. This is what
+  makes the second point matter — it applies to *any* client that reaches
+  Trino, not just traffic that happens to go through the backend.
 - **Airflow itself** — via a custom Auth Manager (AIP-56) that swaps
   Airflow's own authorization engine for one that calls OPA on every Dag
   action: view, trigger, view logs, view code. Same policy data, same
@@ -25,12 +28,15 @@ for why that's the honest design, not an inconsistency.
 ## Architecture
 
 ```
- frontend (nginx, static)  →  backend (FastAPI)  →  OPA (app.allow)
-                                      │        ↘
+ Keycloak (realm "idma")
+        │ login (OIDC, PKCE) — browser redirect
+        ▼
+ frontend (nginx, static)  →  backend (FastAPI, validates the JWT itself)
+                                      │        ↘  OPA (app.allow)
                                       │         PUT policy_data on every write
                                       │              ↓
-                                      ├──→  Trino    →  OPA (trino.allow, rowFilters, columnMask)
-                                      │        │
+                                      ├──→  Trino    →  verifies the same JWT itself (JWT authenticator)
+                                      │        │        →  OPA (trino.allow, rowFilters, columnMask)
                                       │        └──→  demo DB (Postgres)
                                       │
                                       └──→  Airflow  →  OPA (airflow.allow)
@@ -41,10 +47,115 @@ for why that's the honest design, not an inconsistency.
 ```
 
 Nothing here is a "Casbin-style" library embedded anywhere — OPA is the
-only decision engine, called three times: once by the backend
-(`app.rego`), once by Trino (`trino.rego`), once by Airflow's own Auth
-Manager (`airflow.rego`), all three delegating to shared logic in
-`authz.rego`. See `opa/policies/`.
+only *authorization* decision engine, called three times: once by the
+backend (`app.rego`), once by Trino (`trino.rego`), once by Airflow's own
+Auth Manager (`airflow.rego`), all three delegating to shared logic in
+`authz.rego`. See `opa/policies/`. Keycloak is a separate concern —
+*authentication* only, answering "who is this?", never "what can they
+do?".
+
+## Authentication (Keycloak)
+
+Every demo user (`alice`/`bob`/`carol`/`dave`/`erin`) is a real user in a
+Keycloak realm called `idma` (imported once from
+`keycloak/realm-idma.json` on first boot — password equals username for
+every demo user). Two things consume the tokens Keycloak issues:
+
+- **The frontend** logs in via the standard OIDC authorization-code flow
+  (`keycloak-js`, `onLoad: "login-required"` — the browser is redirected
+  to Keycloak's own login page, not a form this app hosts itself) against
+  the public `idma-frontend` client, then sends the resulting access token
+  as `Authorization: Bearer <token>` on every `/api/*` call. The old
+  "Acting as" dropdown is gone — the identity now comes from *who you log
+  in as*, not a client-side selector.
+- **The backend** (`app/auth.py`) validates that token itself on every
+  request — signature against Keycloak's own JWKS endpoint, issuer, and
+  expiry — and takes the caller's identity from the token's
+  `preferred_username` claim. No endpoint trusts a client-supplied `user`
+  parameter anymore.
+- **Trino** validates the *same* token a third time, independently,
+  configured with its own JWT authenticator (`trino/config.properties`)
+  pointed at Keycloak's JWKS. The backend forwards the identical
+  access token it already validated when it opens a Trino connection
+  (`app/trino_client.py`) — sent as a plain `Authorization: Bearer` header
+  rather than through `trino.auth.JWTAuthentication`, because that class
+  refuses to attach over a plain `http://` connection, which is all this
+  POC runs between containers (hence
+  `http-server.authentication.allow-insecure-over-http=true` in Trino's
+  config — never do that with real TLS available).
+- Keycloak also stamps a `trino` audience into the access token (see the
+  realm's `trino-audience-mapper`), which Trino's
+  `required-audience=trino` setting checks — a token minted for some
+  other purpose can't be replayed against Trino.
+- **Trino's own Web UI** and **Airflow's own Web UI** both log in via
+  Keycloak too — a second, browser-facing authenticator on each,
+  alongside the bearer-token one above:
+  - Trino: `http-server.authentication.type=OAUTH2,JWT` — visiting
+    `https://localhost:8443/ui/` unauthenticated redirects to Keycloak's
+    login page. Requires real HTTPS (a self-signed dev cert, see
+    `trino/tls/`) — Trino's OAuth2 Web UI authenticator hardcodes a
+    check that the connection is secure, with no flag to relax it,
+    unlike the JWT authenticator's `allow-insecure-over-http`. Plain
+    `:8080` stays up for the backend's own JWT bearer connection, which
+    doesn't go through this filter.
+  - Airflow: `airflow/config/webserver_config.py` configures
+    Flask-AppBuilder's `AUTH_OAUTH` against the same realm — clicking
+    **Airflow** in the Services tab (or the `login/keycloak` link
+    directly) redirects the same way.
+  - Because both ride the *same* Keycloak realm, and Keycloak keeps its
+    own SSO session in the browser, logging into the frontend once is
+    enough — clicking either service afterward comes back authenticated
+    with no login form, verified end-to-end against the real running
+    stack (see each service's own client in `keycloak/realm-idma.json`:
+    `trino-webui`, `airflow-webserver`).
+
+### What this closes, and what it deliberately doesn't
+
+Before this, Trino had **no authentication at all** — anyone who could
+reach port 8080 could claim to be any user via a plain `user=` connection
+parameter, with zero proof of identity. Now, connecting to Trino directly
+requires a **real, currently-valid, correctly-signed Keycloak token** —
+an anonymous or forged request is rejected outright.
+
+What it does **not** close, verified empirically against the running
+stack (not assumed): the `trino-opa` access-control plugin's
+`checkCanSetUser` hook — the one place a `SystemAccessControl` could
+enforce "the connection's `user=` must match the token's own identity" —
+is a no-op in the shipped plugin (confirmed by disassembling
+`OpaAccessControl.class`: the method body is a bare `return`).
+Trino's own impersonation check (`checkCanImpersonateUser`) is real, but
+it only fires for the separate `X-Trino-Original-User` proxy header, not
+for a mismatch between the JWT's principal and a directly-supplied
+`user=`. Practical result: **any of the five demo users, once
+authenticated as themselves, can still connect to Trino claiming to be a
+*different* demo user** and inherit that user's row filters/column
+masks — reproduce it with:
+
+```bash
+# get a real token for dave, then claim to be alice on the connection
+DAVE_TOKEN=$(curl -s -X POST http://localhost:8180/realms/idma/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=idma-frontend -d username=dave -d password=dave \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+docker exec -it poc_backend_1 python3 -c "
+import trino
+conn = trino.dbapi.connect(host='trino', port=8080, user='alice', catalog='postgres', schema='sales',
+                            http_scheme='http', http_headers={'Authorization': 'Bearer $DAVE_TOKEN'})
+cur = conn.cursor()
+cur.execute('SELECT * FROM sales.orders')
+print(cur.fetchall())  # returns alice's own row-filtered rows — dave impersonated her
+"
+```
+
+Closing this fully would mean a custom `SystemAccessControl` (or a patch
+to `trino-opa`) that denies `checkCanSetUser` whenever it's called with a
+different user than the authenticated principal — real work, genuinely
+out of scope for this POC, and left here undisguised rather than silently
+assumed away. The backend's own path is **not** affected by this gap —
+every backend-issued query already forwards the same user the token
+itself names (`current.username`, taken from the validated JWT, is what's
+passed as both the Trino session user and the identity behind the
+forwarded token), so this only matters for a client that connects to
+Trino directly.
 
 ## Why three enforcement points instead of one
 
@@ -68,7 +179,7 @@ the same mechanism:
 - **Airflow** has a pluggable `BaseAuthManager` SPI (AIP-56), but no
   ready-made OPA implementation ships for it — `opa_auth_manager` (see
   `airflow/plugins/`) is a small custom class this POC wrote, subclassing
-  Airflow's own `SimpleAuthManager` and overriding only `is_authorized_dag`
+  Airflow's `FabAuthManager` and overriding only `is_authorized_dag`
   to call OPA.
 
 Both are still "native" in the sense that matters: the check happens
@@ -136,14 +247,28 @@ Dag, trigger a run, read task logs, view a Dag's code — calls this
 class's `is_authorized_dag()` before doing anything else.
 
 Login/session handling isn't reimplemented: `OPAAuthManager` subclasses
-Airflow's own `SimpleAuthManager` and inherits its static
-username/password/role model (`AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS`)
-rather than wiring Keycloak SSO into Airflow, which this POC doesn't
-attempt — the same "not everywhere yet" honesty as the isolation
-guarantees in the main IDMA deck. That role still gates the handful of
-non-Dag resources (connections, variables, pools, configuration) this
-POC leaves untouched. Only Dag-level authorization — the "job and
-entities" surface the demo focuses on — is overridden to call OPA.
+Airflow's classic `FabAuthManager` (Flask-AppBuilder) rather than writing
+its own login flow, and `airflow/config/webserver_config.py` points
+FAB's OAuth login at the same Keycloak realm the frontend and Trino use
+— clicking **Airflow** in the Services tab logs in via Keycloak SSO, no
+separate password, same as Trino. Every Keycloak-authenticated user is
+auto-provisioned on first login with the same flat FAB role
+(`AUTH_USER_REGISTRATION_ROLE` in that file) — that role still gates the
+handful of non-Dag resources (connections, variables, pools,
+configuration) this POC leaves untouched, identically to before. Only
+Dag-level authorization — the "job and entities" surface the demo
+focuses on — is overridden to call OPA, regardless of that role.
+
+Flask-AppBuilder's own built-in "keycloak" OAuth handler makes a second
+network call to Keycloak's `/userinfo` endpoint that came back a genuine
+401 in this setup, never fully root-caused (a plain `requests.get` with
+the same token succeeds — something about how Authlib issues that
+specific request trips Keycloak's check). Sidestepped rather than
+chased further: `webserver_config.py`'s `KeycloakSecurityManager` reads
+the already-verified ID token claims Authlib hands back as
+`resp["userinfo"]` instead of calling the endpoint a second time — same
+data, and arguably a more direct source of truth than a second round
+trip anyway.
 
 `is_authorized_dag()` receives Airflow's own vocabulary — a `method`
 (`GET`/`POST`/`PUT`/`DELETE`) and an optional `access_entity`
@@ -298,6 +423,30 @@ Plus a region and HR flag per user, used only by Trino's masking/filtering rules
 | `dave` | LATAM | no |
 | `erin` | EMEA | no |
 
+## User management
+
+The frontend's **Users** tab does real CRUD, not just against the tables
+above — creating a user there creates an actual Keycloak account (so that
+person can immediately log in and get their own JWT) *and* a row in the
+authz database's `user_attributes`/`group_membership` tables (org, region,
+HR flag, title, group membership), in one action. Editing and deleting
+work the same way, against both sides.
+
+This needs its own Keycloak client: `idma-backend-admin` (see
+`keycloak/realm-idma.json`), a confidential client with no login flow of
+its own, only a service account scoped to realm-management's
+`manage-users`/`view-users` client roles — never the master `admin/admin`
+login. `backend/app/keycloak_admin.py` is the only thing that uses it.
+
+Once the backend has started, `user_attributes` (not `seed.py`'s
+`DEMO_USERS` dict) is the authoritative answer to "does this user exist"
+for every endpoint — so a user created live through this tab can use the
+Data Catalog, Airflow Jobs, and Storage tabs exactly like
+alice/bob/carol/dave/erin. Deleting a user removes their Keycloak account,
+their `user_attributes` row, their group memberships, and any policy
+grant naming them directly as subject (group grants stay — those belong
+to the group).
+
 ## Running it
 
 ```bash
@@ -310,13 +459,18 @@ startup, and `apache/airflow:3.0.6` is a large image the first time it's
 pulled, plus `airflow-init` running `airflow db migrate` before the
 api-server/scheduler/dag-processor start. Then open:
 
-- **Frontend:** http://localhost:3000
-- **Backend API:** http://localhost:8001 (docs at `/docs`)
-- **Trino UI:** http://localhost:8080
-- **Airflow UI:** http://localhost:8082 — log in as `alice` / `bob` / `carol` / `dave` / `erin`;
-  passwords are generated on first boot, printed to `docker-compose logs airflow-apiserver`
-  (look for `Password for user '<name>'`) — or read them straight from the container:
-  `docker exec poc_airflow-apiserver_1 cat /opt/airflow/simple_auth_manager_passwords.json.generated`
+- **Frontend:** http://localhost:3000 — opening this redirects you to Keycloak's own login
+  page first; log in as any of `alice`/`bob`/`carol`/`dave`/`erin` (password == username)
+- **Keycloak:** http://localhost:8180 — admin console login is `admin` / `admin` (realm
+  `master`); the demo realm is `idma`
+- **Backend API:** http://localhost:8001 (docs at `/docs`) — every route except `/api/health`
+  requires `Authorization: Bearer <Keycloak access token>`
+- **Trino UI:** https://localhost:8443/ui/ — logs in via Keycloak SSO; the browser will warn
+  once about the self-signed cert (`trino/tls/`), click through it. Plain http://localhost:8080
+  still works for API/JDBC clients presenting a bearer token, but has no interactive login.
+- **Airflow UI:** http://localhost:8082 — logs in via Keycloak SSO (same realm, same users);
+  no separate password. The very first Keycloak login for a given user auto-creates their
+  Airflow account.
 - **OPA API:** http://localhost:8181 (`/v1/data/app/allow`, `/v1/data/trino/allow`,
   `/v1/data/airflow/allow`, `/v1/data/policy_data`)
 - **MinIO Console:** http://localhost:9001 — log in with the root credentials below to see both
@@ -327,10 +481,12 @@ api-server/scheduler/dag-processor start. Then open:
 Stop everything with `docker-compose down` (add `-v` to also drop the
 Postgres volume and reset all policies back to the seed state).
 
-> Ports are non-default (`5433`, `8001`, `8082`) because `5432`, `8000`,
-> and `8080` were already in use by other containers on this machine.
-> Change them back in `docker-compose.yml` and `frontend/app.js` (`API`
-> constant) if that's not the case for you.
+> Ports are non-default (`5433`, `8001`, `8082`, `8180`) because `5432`,
+> `8000`, `8080`, and Keycloak's own default were already in use by other
+> containers on this machine. `8443` (Trino's HTTPS/Web UI port) is new,
+> not a remap. Change the remapped ones back in `docker-compose.yml`,
+> `frontend/app.js` (`API` constant), and `frontend/config.js`
+> (`KEYCLOAK_URL`) if that's not the case for you.
 
 > **Already had this stack running before a `git pull`?** A handful of
 > things only happen once, against a genuinely fresh state — cleanest fix
@@ -358,37 +514,49 @@ Postgres volume and reset all policies back to the seed state).
 >    -d --build backend` does nothing for OPA. After editing any `.rego`
 >    file: `docker restart poc_opa_1`, then restart the backend too (it's
 >    what re-pushes `policy_data` into the freshly-emptied OPA).
-> 4. **A new Airflow demo user needs a container recreate, not a
->    restart.** `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS` is baked in at
->    container creation; `docker restart` reuses the old environment.
->    Use `docker-compose up -d airflow-apiserver airflow-scheduler
->    airflow-dag-processor` (recreates, doesn't just restart) after
->    changing that list.
+> 4. **A new demo user only needs adding to `keycloak/realm-idma.json`**
+>    (plus a container recreate for Keycloak to import it) — Airflow no
+>    longer has its own separate user list. The first time that user logs
+>    in via Keycloak, FabAuthManager auto-provisions their Airflow account
+>    (see `AUTH_USER_REGISTRATION` in `airflow/config/webserver_config.py`).
+>    Nothing to change on the Airflow side at all.
 > 5. **`minio-init` is safe to re-run anytime**, on a fresh volume or not
 >    — every step in `minio/init.sh` is idempotent (`--ignore-existing`,
 >    or guarded with `|| true`). If you add a new org's bucket/user/sample
 >    files later, just `docker-compose up -d minio-init` again rather than
 >    hand-rolling `mc` commands.
+> 6. **Keycloak has no data volume, by design** — a `docker restart
+>    poc_keycloak_1` (or any recreate) re-imports `keycloak/realm-idma.json`
+>    from scratch every time, so any change made through Keycloak's own
+>    admin console (http://localhost:8180) is gone on the next restart.
+>    Edit `realm-idma.json` instead if you want it to persist. One side
+>    effect: recreating Keycloak also generates fresh signing keys, so
+>    any access token issued before the recreate stops validating
+>    everywhere (backend, Trino, Airflow) — just log in again.
 
 ## Suggested walkthrough
 
 **Through the app — the backend's own check:**
 
-1. Open the frontend as **Alice** (default). All of `sales` is green, all of
-   `hr` is red. Click `customers` — real rows come back through Trino.
-2. Switch to **Bob**. Only `sales.customers` is green — `orders` and
+1. Open the frontend and log in through Keycloak's own page as **alice**
+   (password `alice`). All of `sales` is green, all of `hr` is red. Click
+   `customers` — real rows come back through Trino. Click **Log out** and
+   log back in as a different user to switch identities from here on —
+   there's no dropdown anymore, the identity comes from who you logged in
+   as.
+2. Log in as **bob**. Only `sales.customers` is green — `orders` and
    `products` are red even though they're the same schema, because Bob's
    grant is direct on one table, not inherited from a group.
-3. Switch to **Dave**. Everything is red — no policy, no access.
+3. Log in as **dave**. Everything is red — no policy, no access.
 
 **The same policy, enforced again natively inside Trino:**
 
-4. Still as **Alice**, click `orders`. Her grant covers the *whole* `sales`
-   schema, but she only sees 4 rows, all `region = 'APAC'` — Trino applied
-   the row filter regardless of her table-level grant. Switch to **Bob**
-   (`region = EMEA`) and click `orders` again — different rows, same
-   table, same query.
-5. Switch to **Carol** and click `salaries` — real salary values, because
+4. Log back in as **alice** and click `orders`. Her grant covers the
+   *whole* `sales` schema, but she only sees 4 rows, all `region = 'APAC'`
+   — Trino applied the row filter regardless of her table-level grant.
+   Log in as **bob** (`region = EMEA`) and click `orders` again —
+   different rows, same table, same query.
+5. Log in as **carol** and click `salaries` — real salary values, because
    the policy marks her as HR.
 6. Scroll to **Live demo: grant / revoke**. Grant `dave` → `hr.salaries` →
    `select`, then click `hr.salaries` on the left immediately — no wait
@@ -401,25 +569,42 @@ Postgres volume and reset all policies back to the seed state).
 **Bypassing the app entirely — this is the part that changed:**
 
 Connect straight to Trino, skipping the backend and its OPA check
-completely. Table-level access is still enforced, because Trino asks OPA
-itself now:
+completely. This now requires a real Keycloak token just to connect at
+all — fetch one the same way the frontend would (minus the browser
+redirect, using the direct-access grant the `idma-frontend` client also
+allows, for scripting convenience):
 
 ```bash
+DAVE_TOKEN=$(curl -s -X POST http://localhost:8180/realms/idma/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=idma-frontend -d username=dave -d password=dave \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
 docker exec -it poc_backend_1 python3 -c "
 import trino
-conn = trino.dbapi.connect(host='trino', port=8080, user='dave', catalog='postgres', schema='hr')
+conn = trino.dbapi.connect(host='trino', port=8080, user='dave', catalog='postgres', schema='hr',
+                            http_scheme='http', http_headers={'Authorization': 'Bearer $DAVE_TOKEN'})
 cur = conn.cursor()
 cur.execute('SELECT * FROM hr.salaries')
 print(cur.fetchall())
 "
 # PERMISSION_DENIED — dave has no grant on hr.salaries, and Trino no
-# longer needs the backend to know that.
+# longer needs the backend to know that. (A request with no token at all,
+# or an expired/forged one, is rejected before OPA is even asked.)
 ```
 
-Try the same with `user='carol'` — she's granted `hr` access via her
-group and is marked HR, so it succeeds with real salary values. Try
+Fetch a token for `carol` the same way and connect with `user='carol'` —
+she's granted `hr` access via her group and is marked HR, so it succeeds
+with real salary values. Fetch one for `alice` and connect with
 `user='alice'` against `sales.orders` — succeeds, but still only her
 region's rows.
+
+> **Known gap, not swept under the rug:** the `user=` above must match
+> whichever token you fetched — but Trino doesn't actually *enforce*
+> that pairing (see "What this closes, and what it deliberately doesn't"
+> above). Fetching `dave`'s token and connecting with `user='alice'`
+> instead succeeds and returns alice's own rows. The backend's own path
+> never has this problem (it always pairs a user with their own token);
+> only a direct-to-Trino client can exploit it.
 
 **Same story, one engine over — the Airflow Jobs tab:**
 
@@ -427,21 +612,23 @@ region's rows.
    four permission chips green (`view`, `trigger`, `view_logs`,
    `view_code`) — her `grp_data_eng` grant. `hr_payroll_sync` and
    `customer_export` are all red.
-9. Switch to **Bob** — only `customer_export`'s `view` chip is green, a
+9. Log in as **bob** — only `customer_export`'s `view` chip is green, a
    direct per-Dag grant, same shape as his `sales.customers` grant in
-   Trino. Switch to **Dave** — everything red, same default deny.
+   Trino. Log in as **dave** — everything red, same default deny.
 10. Use **Live demo: grant / revoke** on this tab to grant `dave` →
     `airflow.dag.hr_payroll_sync` → `trigger`, then look at Dave's row
     again — instant, same mechanism as the Trino tab's grant form.
 11. This tab previews the *policy*, not Airflow itself — for the real
-    thing, open the **Airflow UI** (http://localhost:8082) and log in as
-    two different users. The Dag list you see *is* filtered by these same
-    grants, decided natively inside Airflow by `opa_auth_manager` on
-    every request — not by anything this frontend or backend did.
+    thing, open the **Airflow UI** (http://localhost:8082) and log in via
+    Keycloak SSO as two different users (log out of Keycloak between them
+    to switch — see "Authentication" above). Clicking into `sales_etl` or
+    trying to trigger `hr_payroll_sync` enforces the same grants live —
+    decided natively inside Airflow by `opa_auth_manager` on every
+    request, not by anything this frontend or backend did.
 
 **Organization isolation — the sharpest test in this whole demo:**
 
-12. Switch to **Erin** (org-002 — note the org tag next to "Acting as"
+12. Log in as **erin** (org-002 — note the org tag next to "Logged in as"
     now reads `Globex Logistics (org-002)`, not `Acme Retail (org-001)`).
     On the **Data Catalog** tab, `org2_sales` is green; `sales` and `hr`
     are both red. On the **Airflow Jobs** tab, `org2_etl` is green with
@@ -450,17 +637,20 @@ region's rows.
     "no grant exists": **Erin is in `grp_data_eng` — the exact same group
     as Alice** (check the Policy inspector's `g` table). That group *is*
     granted `sales` (org-001) as well as `org2_sales` (org-002). If you
-    switch back to Alice, `org2_sales` is still red despite her group
+    log back in as alice, `org2_sales` is still red despite her group
     membership nominally matching that grant too — the `same_org()` check
     in `authz.rego` blocks it independently of the subject/resource match,
     the same way a row filter or column mask applies independently of a
     table grant.
 14. This isn't just a policy-preview effect — confirm it against the real
-    engines. Direct-to-Trino, bypassing the backend entirely:
+    engines. Direct-to-Trino, bypassing the backend entirely, using
+    alice's *own* token this time (fetched the same way as above with
+    `username=alice -d password=alice`):
     ```bash
     docker exec -it poc_backend_1 python3 -c "
     import trino
-    conn = trino.dbapi.connect(host='trino', port=8080, user='alice', catalog='postgres', schema='org2_sales')
+    conn = trino.dbapi.connect(host='trino', port=8080, user='alice', catalog='postgres', schema='org2_sales',
+                                http_scheme='http', http_headers={'Authorization': 'Bearer $ALICE_TOKEN'})
     cur = conn.cursor()
     cur.execute('SELECT * FROM org2_sales.customers')
     print(cur.fetchall())
@@ -468,10 +658,10 @@ region's rows.
     # PERMISSION_DENIED — alice's grp_data_eng grant on org2_sales exists,
     # but Trino's own OPA check still enforces the org boundary.
     ```
-    Swap `user='erin'` and it succeeds with real rows. Same asymmetry
-    holds logging into the real Airflow UI as each user — Erin sees only
-    `org2_etl`, Alice sees only `sales_etl`, even though both are
-    `grp_data_eng`.
+    Fetch erin's own token and connect with `user='erin'` and it succeeds
+    with real rows. Same asymmetry holds logging into the real Airflow UI
+    as each user — Erin sees only `org2_etl`, Alice sees only `sales_etl`,
+    even though both are `grp_data_eng`.
 
 **Storage isolation — a different mechanism, on purpose:**
 
@@ -482,7 +672,7 @@ region's rows.
     here is a config lookup. Click any file to preview its real contents.
 16. Click **Try the other org's bucket**. The result is a genuine MinIO
     `AccessDenied`, not a "no policy grants this" message — there's no
-    OPA involved on this tab at all. Switch to Erin and repeat: same
+    OPA involved on this tab at all. Log in as erin and repeat: same
     button, same denial, opposite direction.
 17. Confirm it outside the app entirely — the MinIO Console
     (http://localhost:9001) logged in as root shows both buckets and
@@ -496,11 +686,17 @@ region's rows.
 poc/
 ├── docker-compose.yml
 ├── postgres/init/         # schema + seed data, and the authz/airflow DB bootstrap
+├── keycloak/
+│   └── realm-idma.json    # realm "idma" — demo users, idma-frontend/trino-webui/airflow-webserver/idma-backend-admin clients
 ├── trino/
 │   ├── catalog/                    # postgres.properties — Trino's connector config
+│   ├── config.properties           # OAUTH2 (Web UI) + JWT (API) authenticators, Keycloak JWKS/issuer
+│   ├── tls/keystore.p12            # self-signed dev cert — HTTPS is required for the OAuth2 Web UI
 │   └── access-control.properties   # wires Trino to the OPA plugin
 ├── airflow/
 │   ├── dags/               # 4 trivial demo Dags (sales_etl, hr_payroll_sync, customer_export, org2_etl)
+│   ├── config/
+│   │   └── webserver_config.py   # FabAuthManager's Keycloak OAuth login config
 │   └── plugins/
 │       └── opa_auth_manager/
 │           └── auth_manager.py   # BaseAuthManager subclass — is_authorized_dag() calls OPA
@@ -515,10 +711,14 @@ poc/
 ├── backend/
 │   └── app/
 │       ├── main.py            # API routes, incl. /api/airflow/dags, /api/storage/files
-│       ├── db.py              # the authz database — schema, seeding, reads/writes
+│       ├── auth.py            # validates Keycloak JWTs on every route (JWKS, issuer, expiry)
+│       ├── db.py              # the authz database — schema, seeding, reads/writes, Users CRUD
 │       ├── opa_client.py      # calls OPA for decisions; pushes policy_data on writes
 │       ├── storage_client.py  # per-org MinIO/S3 clients — no OPA involved, credential isolation only
+│       ├── keycloak_admin.py  # backend's service-account client for the Users tab's real account CRUD
 │       ├── seed.py            # demo users + orgs, resource tree, resource_org, ORG_STORAGE, policies
-│       └── trino_client.py    # runs the one allowed query shape
-└── frontend/               # static HTML/CSS/JS, no build step — Data Catalog + Airflow Jobs + Storage tabs
+│       └── trino_client.py    # runs the one allowed query shape, forwarding the caller's JWT
+└── frontend/               # static HTML/CSS/JS, no build step — Data Catalog + Airflow Jobs + Storage + Users tabs
+    # keycloak-js drives the login redirect; app.js attaches the resulting
+    # token as Authorization: Bearer on every /api/* call
 ```

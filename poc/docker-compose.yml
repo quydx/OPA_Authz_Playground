@@ -15,22 +15,26 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-apiserver:8080/execution/"
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
-    # opa_auth_manager still delegates non-Dag resources (connections,
-    # variables, pools, config) to SimpleAuthManager's role check — every
-    # demo user needs a role for those, even though Dag access itself is
-    # fully decided by OPA regardless of role.
-    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "alice:USER,bob:USER,carol:USER,dave:VIEWER,erin:USER"
-    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "false"
+    # FabAuthManager's default session backend expects a "session" table
+    # this POC never migrates in — signed-cookie sessions need no table
+    # and are plenty for a demo (session dies if AIRFLOW__WEBSERVER__SECRET_KEY
+    # isn't fixed and the apiserver restarts, which is fine here).
+    AIRFLOW__FAB__SESSION_BACKEND: securecookie
+    # Fixed so a session survives an apiserver restart — POC-only value.
+    AIRFLOW__WEBSERVER__SECRET_KEY: poc-airflow-webserver-secret-key
     OPA_URL: http://opa:8181
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/config/webserver_config.py:/opt/airflow/webserver_config.py:ro
     - airflow-logs:/opt/airflow/logs
   depends_on:
     &airflow-common-depends-on
     postgres:
       condition: service_healthy
     opa:
+      condition: service_started
+    keycloak:
       condition: service_started
 
 services:
@@ -59,17 +63,44 @@ services:
     ports:
       - "8181:8181"
 
+  # Authentication service (see IDMA Authen & Authz.MD — "IDMA use Keycloak
+  # as Authentication service"). Dev mode (KC_DB unset -> dev-file), no
+  # volume mounted for its data directory — every container recreate
+  # re-imports the realm fresh from keycloak/realm-idma.json, same
+  # idempotent-by-design spirit as minio/init.sh. Demo users
+  # (alice/bob/carol/dave/erin) all have password == username.
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.6
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8180"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+    volumes:
+      - ./keycloak/realm-idma.json:/opt/keycloak/data/import/realm-idma.json:ro
+    ports:
+      - "8180:8080"
+
   trino:
     image: trinodb/trino:latest
     ports:
       - "8080:8080"
+      - "8443:8443"
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/config.properties:/etc/trino/config.properties:ro
       - ./trino/access-control.properties:/etc/trino/access-control.properties:ro
+      - ./trino/tls:/etc/trino/tls:ro
     depends_on:
       postgres:
         condition: service_healthy
       opa:
+        condition: service_started
+      keycloak:
         condition: service_started
 
   minio:
@@ -118,6 +149,22 @@ services:
       TRINO_PORT: "8080"
       TRINO_CATALOG: postgres
       MINIO_ENDPOINT: http://minio:9000
+      # iss claim on tokens minted by Keycloak is fixed by KC_HOSTNAME above
+      # to the address the browser uses (localhost:8180) regardless of which
+      # network path a given request took — the backend verifies against
+      # that same value, and fetches the signing keys over the internal
+      # docker network (a different address is fine; JWKS lookup and issuer
+      # matching are independent checks).
+      KEYCLOAK_ISSUER: http://localhost:8180/realms/idma
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/idma/protocol/openid-connect/certs
+      # Users CRUD (see app/keycloak_admin.py): the backend's own service
+      # account, confined to realm-management's manage-users/view-users
+      # client roles (see keycloak/realm-idma.json) — never the master
+      # admin/admin login.
+      KEYCLOAK_ADMIN_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: idma
+      KEYCLOAK_ADMIN_CLIENT_ID: idma-backend-admin
+      KEYCLOAK_ADMIN_CLIENT_SECRET: idma-backend-admin-secret
     ports:
       - "8001:8000"
     depends_on:
@@ -129,6 +176,8 @@ services:
         condition: service_started
       minio-init:
         condition: service_completed_successfully
+      keycloak:
+        condition: service_started
 
   frontend:
     build: ./frontend

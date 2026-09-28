@@ -1,20 +1,19 @@
 import threading
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from app import airflow_client, db, opa_client, storage_client
+from app import db, keycloak_admin, opa_client, storage_client
+from app.auth import AuthedUser, get_current_user
 from app.seed import (
     AIRFLOW_ACTIONS,
     AIRFLOW_DAGS,
     CATALOG,
-    DEMO_USERS,
     ORGANIZATIONS,
     RESOURCE_ORG,
     all_known_airflow_resources,
     all_known_resources,
-    all_known_subjects,
 )
 from app.trino_client import run_select, wait_for_trino
 
@@ -51,33 +50,127 @@ def health():
 
 
 @app.get("/api/users")
-def list_users():
-    data = db.get_policy_data()
-    groups_by_user: dict[str, list[str]] = {}
-    for member, grp in data["g"]:
-        groups_by_user.setdefault(member, []).append(grp)
-    return [
-        {
-            "id": uid,
-            "label": info["label"],
-            "title": info["title"],
-            "groups": groups_by_user.get(uid, []),
-            "org": info["org"],
-            "org_label": ORGANIZATIONS.get(info["org"], info["org"]),
-        }
-        for uid, info in DEMO_USERS.items()
-    ]
+def list_users(current: AuthedUser = Depends(get_current_user)):
+    return [{**u, "org_label": ORGANIZATIONS.get(u["org"], u["org"])} for u in db.list_users()]
+
+
+class UserCreateRequest(BaseModel):
+    username: str
+    first_name: str
+    last_name: str
+    email: str
+    password: str
+    title: str = ""
+    org: str = "org-001"
+    region: str = "APAC"
+    hr: bool = False
+    groups: list[str] = []
+
+
+class UserUpdateRequest(BaseModel):
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    password: str | None = None
+    title: str | None = None
+    org: str | None = None
+    region: str | None = None
+    hr: bool | None = None
+    groups: list[str] | None = None
+
+
+@app.post("/api/users")
+def create_user(req: UserCreateRequest, current: AuthedUser = Depends(get_current_user)):
+    if db.get_user(req.username):
+        raise HTTPException(status_code=409, detail=f"user '{req.username}' already exists")
+    if req.org not in ORGANIZATIONS:
+        raise HTTPException(status_code=400, detail=f"unknown organization '{req.org}'")
+
+    # Keycloak first: if this fails (e.g. username collision Keycloak
+    # itself already knows about), nothing in the authz database changes.
+    try:
+        keycloak_admin.create_user(req.username, req.first_name, req.last_name, req.email, req.password)
+    except keycloak_admin.KeycloakAdminError as err:
+        raise HTTPException(status_code=502, detail=f"Keycloak user creation failed: {err}") from err
+
+    label = f"{req.first_name} {req.last_name}".strip() or req.username
+    try:
+        db.create_user_attributes(req.username, label, req.title, req.region, req.hr, req.org)
+        db.set_user_groups(req.username, req.groups)
+    except Exception:
+        # Don't leave an orphan Keycloak account (one that can log in but
+        # is invisible to every /api endpoint below) behind a failed write.
+        # Best-effort: the original db exception below is the one that
+        # matters, not a secondary failure cleaning up after it.
+        try:
+            keycloak_admin.delete_user(req.username)
+        except keycloak_admin.KeycloakAdminError:
+            pass
+        raise
+    opa_client.push_policy_data(db.get_policy_data())
+    return {"ok": True, "id": req.username}
+
+
+@app.put("/api/users/{username}")
+def update_user(username: str, req: UserUpdateRequest, current: AuthedUser = Depends(get_current_user)):
+    existing = db.get_user(username)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"unknown user '{username}'")
+    if req.org is not None and req.org not in ORGANIZATIONS:
+        raise HTTPException(status_code=400, detail=f"unknown organization '{req.org}'")
+
+    try:
+        keycloak_admin.update_user(
+            username, first_name=req.first_name, last_name=req.last_name, email=req.email, password=req.password
+        )
+    except keycloak_admin.KeycloakAdminError as err:
+        raise HTTPException(status_code=502, detail=f"Keycloak user update failed: {err}") from err
+
+    label = existing["label"]
+    if req.first_name is not None or req.last_name is not None:
+        first = req.first_name if req.first_name is not None else existing["label"].split(" ", 1)[0]
+        last = req.last_name if req.last_name is not None else ""
+        label = f"{first} {last}".strip() or existing["label"]
+    db.update_user_attributes(
+        username,
+        label=label,
+        title=req.title if req.title is not None else existing["title"],
+        region=req.region if req.region is not None else existing["region"],
+        is_hr=req.hr if req.hr is not None else existing["hr"],
+        org=req.org if req.org is not None else existing["org"],
+    )
+    if req.groups is not None:
+        db.set_user_groups(username, req.groups)
+    opa_client.push_policy_data(db.get_policy_data())
+    return {"ok": True}
+
+
+@app.delete("/api/users/{username}")
+def delete_user(username: str, current: AuthedUser = Depends(get_current_user)):
+    if not db.get_user(username):
+        raise HTTPException(status_code=404, detail=f"unknown user '{username}'")
+    if username == current.username:
+        raise HTTPException(status_code=400, detail="cannot delete the account you're logged in as")
+
+    try:
+        keycloak_admin.delete_user(username)
+    except keycloak_admin.KeycloakAdminError as err:
+        raise HTTPException(status_code=502, detail=f"Keycloak user deletion failed: {err}") from err
+    db.delete_user_attributes(username)
+    opa_client.push_policy_data(db.get_policy_data())
+    return {"ok": True}
 
 
 @app.get("/api/organizations")
-def list_organizations():
+def list_organizations(current: AuthedUser = Depends(get_current_user)):
     return [{"id": org_id, "label": label} for org_id, label in ORGANIZATIONS.items()]
 
 
 @app.get("/api/catalog")
-def get_catalog(user: str):
-    if user not in DEMO_USERS:
-        raise HTTPException(status_code=404, detail=f"unknown demo user '{user}'")
+def get_catalog(current: AuthedUser = Depends(get_current_user)):
+    user = current.username
+    if not db.get_user(user):
+        raise HTTPException(status_code=404, detail=f"unknown user '{user}'")
     tree = []
     for schema, tables in CATALOG.items():
         schema_allowed = opa_client.check(user, schema, "select")
@@ -106,30 +199,30 @@ def get_catalog(user: str):
 
 
 class QueryRequest(BaseModel):
-    user: str
     resource: str  # e.g. "sales.customers"
 
 
 @app.post("/api/query")
-def query(req: QueryRequest):
-    if req.user not in DEMO_USERS:
-        raise HTTPException(status_code=404, detail=f"unknown demo user '{req.user}'")
+def query(req: QueryRequest, current: AuthedUser = Depends(get_current_user)):
+    user = current.username
+    if not db.get_user(user):
+        raise HTTPException(status_code=404, detail=f"unknown user '{user}'")
     if "." not in req.resource:
         raise HTTPException(status_code=400, detail="pick a table, not a schema, to run a query")
 
-    allowed = opa_client.check(req.user, req.resource, "select")
-    decision = {"sub": req.user, "obj": req.resource, "act": "select"}
+    allowed = opa_client.check(user, req.resource, "select")
+    decision = {"sub": user, "obj": req.resource, "act": "select"}
 
     if not allowed:
         return {
             "allowed": False,
             "request": decision,
-            "message": f"OPA denied this request — no policy grants '{req.user}' select on '{req.resource}'.",
+            "message": f"OPA denied this request — no policy grants '{user}' select on '{req.resource}'.",
         }
 
     schema, table = req.resource.split(".", 1)
     try:
-        columns, rows = run_select(req.user, schema, table)
+        columns, rows = run_select(user, current.token, schema, table)
     except Exception as err:  # noqa: BLE001 — surfaced to the demo UI verbatim
         raise HTTPException(status_code=502, detail=f"Trino query failed: {err}") from err
 
@@ -137,7 +230,7 @@ def query(req: QueryRequest):
 
 
 @app.get("/api/policies")
-def get_policies():
+def get_policies(current: AuthedUser = Depends(get_current_user)):
     data = db.get_policy_data()
     return {
         "p": data["p"],
@@ -154,20 +247,21 @@ class PolicyRequest(BaseModel):
 
 
 @app.get("/api/policy-options")
-def policy_options():
-    return {"subjects": all_known_subjects(), "resources": all_known_resources()}
+def policy_options(current: AuthedUser = Depends(get_current_user)):
+    return {"subjects": db.known_subjects(), "resources": all_known_resources()}
 
 
 @app.get("/api/airflow/dags")
-def list_airflow_dags(user: str):
+def list_airflow_dags(current: AuthedUser = Depends(get_current_user)):
     """Same idea as /api/catalog, one layer up: for each demo Dag, the
     current user's permission on every action in the Airflow vocabulary
     (view / trigger / view_logs / view_code), decided by the exact same
     OPA check (data.app.allow) that opa_auth_manager calls natively
     inside Airflow itself via data.airflow.allow — this endpoint doesn't
     talk to Airflow at all, it previews the same policy_data decision."""
-    if user not in DEMO_USERS:
-        raise HTTPException(status_code=404, detail=f"unknown demo user '{user}'")
+    user = current.username
+    if not db.get_user(user):
+        raise HTTPException(status_code=404, detail=f"unknown user '{user}'")
     out = []
     for dag_id, info in AIRFLOW_DAGS.items():
         resource = f"airflow.dag.{dag_id}"
@@ -188,24 +282,26 @@ def list_airflow_dags(user: str):
 
 
 @app.get("/api/airflow/policy-options")
-def airflow_policy_options():
+def airflow_policy_options(current: AuthedUser = Depends(get_current_user)):
     return {
-        "subjects": all_known_subjects(),
+        "subjects": db.known_subjects(),
         "resources": all_known_airflow_resources(),
         "actions": AIRFLOW_ACTIONS,
     }
 
 
 @app.get("/api/storage/files")
-def list_storage_files(user: str):
+def list_storage_files(current: AuthedUser = Depends(get_current_user)):
     """Buckets and files the caller's own org can see — discovered live
     from MinIO's own ListBuckets/ListObjectsV2 responses using that org's
     scoped credentials (see storage_client.py), not a bucket name looked
     up from config. There's no OPA check here at all: the isolation is
     the credential itself, structurally unable to reach another bucket."""
-    if user not in DEMO_USERS:
-        raise HTTPException(status_code=404, detail=f"unknown demo user '{user}'")
-    org = DEMO_USERS[user]["org"]
+    user = current.username
+    user_row = db.get_user(user)
+    if not user_row:
+        raise HTTPException(status_code=404, detail=f"unknown user '{user}'")
+    org = user_row["org"]
     try:
         buckets = storage_client.list_files(org)
     except Exception as err:  # noqa: BLE001 — surfaced to the demo UI verbatim
@@ -218,10 +314,12 @@ def list_storage_files(user: str):
 
 
 @app.get("/api/storage/file")
-def get_storage_file(user: str, bucket: str, key: str):
-    if user not in DEMO_USERS:
-        raise HTTPException(status_code=404, detail=f"unknown demo user '{user}'")
-    org = DEMO_USERS[user]["org"]
+def get_storage_file(bucket: str, key: str, current: AuthedUser = Depends(get_current_user)):
+    user = current.username
+    user_row = db.get_user(user)
+    if not user_row:
+        raise HTTPException(status_code=404, detail=f"unknown user '{user}'")
+    org = user_row["org"]
     try:
         content = storage_client.get_file(org, bucket, key)
     except Exception as err:  # noqa: BLE001
@@ -230,16 +328,18 @@ def get_storage_file(user: str, bucket: str, key: str):
 
 
 @app.get("/api/storage/cross-check")
-def storage_cross_check(user: str):
+def storage_cross_check(current: AuthedUser = Depends(get_current_user)):
     """Proves the isolation is real rather than assumed: finds a bucket
     that exists but isn't in the caller's own org's ListBuckets response
     (via the MinIO root credential — read-only, ListBuckets only, never
     used to read object data), then deliberately reads it using the
     caller's own scoped credentials. Expected result is a genuine MinIO
     AccessDenied — see storage_client.cross_org_attempt."""
-    if user not in DEMO_USERS:
-        raise HTTPException(status_code=404, detail=f"unknown demo user '{user}'")
-    org = DEMO_USERS[user]["org"]
+    user = current.username
+    user_row = db.get_user(user)
+    if not user_row:
+        raise HTTPException(status_code=404, detail=f"unknown user '{user}'")
+    org = user_row["org"]
     try:
         result = storage_client.cross_org_attempt(org)
     except Exception as err:  # noqa: BLE001
@@ -247,23 +347,15 @@ def storage_cross_check(user: str):
     return {"acting_org": org, **result}
 
 
-@app.get("/api/airflow/credentials")
-def airflow_credentials():
-    """Live demo-user passwords for the Credentials tab. `available` is
-    false outside Kubernetes (no K8S_NAMESPACE) — the frontend falls back
-    to log-fetch instructions in that case rather than showing nothing."""
-    return {"available": airflow_client.available(), "passwords": airflow_client.fetch_passwords()}
-
-
 @app.post("/api/policies/grant")
-def grant_policy(req: PolicyRequest):
+def grant_policy(req: PolicyRequest, current: AuthedUser = Depends(get_current_user)):
     added = db.add_policy(req.sub, req.obj, req.act)
     opa_client.push_policy_data(db.get_policy_data())
     return {"ok": True, "added": added}
 
 
 @app.post("/api/policies/revoke")
-def revoke_policy(req: PolicyRequest):
+def revoke_policy(req: PolicyRequest, current: AuthedUser = Depends(get_current_user)):
     removed = db.remove_policy(req.sub, req.obj, req.act)
     opa_client.push_policy_data(db.get_policy_data())
     return {"ok": True, "removed": removed}

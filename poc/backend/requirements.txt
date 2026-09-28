@@ -6,3 +6,4 @@ trino==0.339.0
 pydantic==2.13.5
 boto3==1.43.91
 kubernetes==31.0.0
+PyJWT[crypto]==2.10.1

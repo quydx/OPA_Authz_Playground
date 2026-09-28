@@ -1,6 +1,13 @@
 const API = window.API_BASE || "http://localhost:8001";
 
-const userSelect = document.getElementById("user-select");
+const keycloak = new Keycloak({
+  url: window.KEYCLOAK_URL || "http://localhost:8180",
+  realm: window.KEYCLOAK_REALM || "idma",
+  clientId: window.KEYCLOAK_CLIENT_ID || "idma-frontend",
+});
+
+const userName = document.getElementById("user-name");
+const logoutBtn = document.getElementById("logout-btn");
 const userOrg = document.getElementById("user-org");
 const userGroups = document.getElementById("user-groups");
 const catalogTree = document.getElementById("catalog-tree");
@@ -27,27 +34,38 @@ const storageCrossCheckResult = document.getElementById("storage-cross-check-res
 const servicesList = document.getElementById("services-list");
 const credentialsTable = document.getElementById("credentials-table");
 
+const usersTableBody = document.querySelector("#users-table tbody");
+const usersStatus = document.getElementById("users-status");
+const userNewBtn = document.getElementById("user-new-btn");
+const userForm = document.getElementById("user-form");
+const userFormTitle = document.getElementById("user-form-title");
+const userFormCancel = document.getElementById("user-form-cancel");
+const userUsername = document.getElementById("user-username");
+const userFirstName = document.getElementById("user-first-name");
+const userLastName = document.getElementById("user-last-name");
+const userEmail = document.getElementById("user-email");
+const userPassword = document.getElementById("user-password");
+const userTitle = document.getElementById("user-title");
+const userOrgSelect = document.getElementById("user-org-input");
+const userRegion = document.getElementById("user-region");
+const userHr = document.getElementById("user-hr");
+const userGroupsInput = document.getElementById("user-groups-input");
+
 let currentUser = null;
 
 // Same demo-only values as poc/docker-compose.yml / poc/k8s/01-secrets.yaml
-// and poc/backend/app/seed.py's ORG_STORAGE. Airflow is the one exception —
-// SimpleAuthManager mints a fresh random password per user on every apiserver
-// start, so there's no fixed value to show; window.AIRFLOW_LOG_CMD (k8s
-// override in poc/k8s/07-frontend.yaml) says how to fetch the current one.
-const DEFAULT_AIRFLOW_LOG_CMD = 'docker compose logs airflow-apiserver | grep "Password for user"';
-
+// and poc/backend/app/seed.py's ORG_STORAGE. Trino and Airflow both log in
+// via the same Keycloak realm as the frontend now — see the "Keycloak" row
+// — rather than having their own separate credentials.
 const DEFAULT_CREDENTIALS = [
   { service: "Postgres", user: "poc", pass: "pocpass", notes: "one instance, three databases: authz, demo, airflow" },
   { service: "MinIO (console / admin)", user: "pocadmin", pass: "pocadminpass", notes: "full admin — MinIO Console login" },
   { service: "MinIO — org-001 (Acme Retail)", user: "org001svc", pass: "org001SecretKey123", notes: "scoped to org-001's bucket only — native MinIO IAM, no OPA involved" },
   { service: "MinIO — org-002 (Globex Logistics)", user: "org002svc", pass: "org002SecretKey456", notes: "scoped to org-002's bucket only" },
-  { service: "Airflow", user: "alice", pass: null, notes: "USER · org-001 · grp_data_eng" },
-  { service: "Airflow", user: "bob", pass: null, notes: "USER · org-001" },
-  { service: "Airflow", user: "carol", pass: null, notes: "USER · org-001 · grp_hr" },
-  { service: "Airflow", user: "dave", pass: null, notes: "VIEWER · org-001" },
-  { service: "Airflow", user: "erin", pass: null, notes: "USER · org-002 · grp_data_eng (same group as alice, different org — isolation still holds)" },
-  { service: "Trino", user: null, pass: null, notes: "no authentication — client sends user= directly; trino.rego is the only gate" },
+  { service: "Trino", user: null, pass: null, notes: "authenticates the caller's Keycloak JWT itself — Web UI via OAuth2 SSO, API/JDBC via a bearer token; trino.rego then decides what that caller can do" },
+  { service: "Airflow", user: null, pass: null, notes: "logs in via the same Keycloak realm (FabAuthManager OAuth) — every Keycloak user is auto-provisioned on first login with the same flat role; Dag-level access is still decided by OPA, not this role" },
   { service: "OPA", user: null, pass: null, notes: "no authentication — internal service only" },
+  { service: "Keycloak", user: "alice / bob / carol / dave / erin", pass: "same as username", notes: "authentication service — realm \"idma\"; admin console login is admin/admin" },
 ];
 
 // docker-compose default — every service is published on a host port.
@@ -56,16 +74,27 @@ const DEFAULT_CREDENTIALS = [
 const DEFAULT_SERVICES = [
   { name: "Frontend", port: 3000, path: "/", desc: "this UI" },
   { name: "Backend API", port: 8001, path: "/api/health", desc: "FastAPI" },
-  { name: "Trino", port: 8080, path: "/ui/", desc: "coordinator UI" },
-  { name: "Airflow", port: 8082, path: "/", desc: "webserver" },
+  { name: "Keycloak", port: 8180, path: "/admin/master/console/", desc: "authentication service — realm \"idma\"" },
+  { name: "Trino", port: 8443, scheme: "https:", path: "/ui/", desc: "coordinator UI — click to log in via Keycloak SSO (self-signed cert, browser will warn once)" },
+  { name: "Airflow", port: 8082, path: "/auth/login/keycloak?next=", desc: "webserver — click to log in via Keycloak SSO" },
   { name: "MinIO API", port: 9000, path: "/", desc: "S3 endpoint" },
   { name: "MinIO Console", port: 9001, path: "/", desc: "browser UI" },
   { name: "OPA", port: 8181, path: "/health", desc: "policy engine" },
   { name: "Postgres", port: 5433, desc: "authz · demo · airflow DBs", tcp: true },
 ];
 
-async function api(path, opts) {
-  const res = await fetch(`${API}${path}`, opts);
+async function api(path, opts = {}) {
+  // Refresh the access token if it's within 30s of expiring — every call
+  // through here carries a real Keycloak-issued Bearer token, the same
+  // one the backend validates against Keycloak's own JWKS endpoint.
+  try {
+    await keycloak.updateToken(30);
+  } catch (err) {
+    keycloak.login();
+    throw new Error("session expired — redirecting to login");
+  }
+  const headers = { ...(opts.headers || {}), Authorization: `Bearer ${keycloak.token}` };
+  const res = await fetch(`${API}${path}`, { ...opts, headers });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail || `${res.status} ${res.statusText}`);
@@ -82,6 +111,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.getElementById("tab-catalog").hidden = btn.dataset.tab !== "catalog";
     document.getElementById("tab-airflow").hidden = btn.dataset.tab !== "airflow";
     document.getElementById("tab-storage").hidden = btn.dataset.tab !== "storage";
+    document.getElementById("tab-users").hidden = btn.dataset.tab !== "users";
     document.getElementById("tab-architecture").hidden = btn.dataset.tab !== "architecture";
     document.getElementById("tab-services").hidden = btn.dataset.tab !== "services";
     document.getElementById("tab-credentials").hidden = btn.dataset.tab !== "credentials";
@@ -100,33 +130,34 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
       storageCrossCheckResult.innerHTML = "";
       storagePreview.innerHTML = `<p class="result-empty">Click a file on the left to preview it.</p>`;
     }
+    if (btn.dataset.tab === "users") {
+      closeUserForm();
+      loadUsers();
+    }
   });
 });
 
 // ---------------------------------------------------------------------
-// Users (shared across tabs)
+// Identity (shared across tabs) — comes from the Keycloak session, not a
+// dropdown. `currentUser` is the token's own preferred_username claim;
+// /api/users just supplies the label/org/groups to display for it.
 // ---------------------------------------------------------------------
-async function loadUsers() {
+async function loadCurrentUser() {
+  currentUser = keycloak.tokenParsed.preferred_username;
+  userName.textContent = currentUser;
   const users = await api("/api/users");
-  userSelect.innerHTML = users
-    .map((u) => `<option value="${u.id}">${u.label} — ${u.title}</option>`)
-    .join("");
-  currentUser = users[0].id;
-  userSelect.value = currentUser;
-  renderUserGroups(users);
-}
-
-function renderUserGroups(users) {
-  const u = users.find((x) => x.id === userSelect.value);
-  userGroups.textContent = u.groups.length ? `member of ${u.groups.join(", ")}` : "no group membership";
-  userOrg.textContent = `${u.org_label} (${u.org})`;
+  const u = users.find((x) => x.id === currentUser);
+  if (u) {
+    userGroups.textContent = u.groups.length ? `member of ${u.groups.join(", ")}` : "no group membership";
+    userOrg.textContent = `${u.org_label} (${u.org})`;
+  }
 }
 
 // ---------------------------------------------------------------------
 // Data Catalog tab
 // ---------------------------------------------------------------------
 async function loadCatalog() {
-  const tree = await api(`/api/catalog?user=${encodeURIComponent(currentUser)}`);
+  const tree = await api("/api/catalog");
   catalogTree.innerHTML = tree
     .map((schema) => {
       const rows = schema.tables
@@ -160,7 +191,7 @@ async function runQuery(resource) {
     const res = await api("/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: currentUser, resource }),
+      body: JSON.stringify({ resource }),
     });
     renderResult(res);
   } catch (err) {
@@ -224,7 +255,7 @@ async function refreshAll() {
 // Airflow Jobs tab
 // ---------------------------------------------------------------------
 async function loadAirflowDags() {
-  const dags = await api(`/api/airflow/dags?user=${encodeURIComponent(currentUser)}`);
+  const dags = await api("/api/airflow/dags");
   dagList.innerHTML = dags
     .map((dag) => {
       const chips = Object.entries(dag.permissions)
@@ -270,7 +301,7 @@ function formatSize(bytes) {
 }
 
 async function loadStorageFiles() {
-  const data = await api(`/api/storage/files?user=${encodeURIComponent(currentUser)}`);
+  const data = await api("/api/storage/files");
   const bucketNames = Object.keys(data.buckets);
   storageBucketTag.textContent = data.org;
   storageBucketTag.title = `belongs to ${data.org_label}`;
@@ -309,7 +340,7 @@ async function previewStorageFile(bucket, key) {
   storagePreview.innerHTML = `<p class="result-empty">Loading…</p>`;
   try {
     const res = await api(
-      `/api/storage/file?user=${encodeURIComponent(currentUser)}&bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`
+      `/api/storage/file?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`
     );
     storagePreview.innerHTML = `<div class="file-preview">${escapeHtml(res.content)}</div>`;
   } catch (err) {
@@ -324,7 +355,7 @@ function escapeHtml(s) {
 async function runStorageCrossCheck() {
   storageCrossCheckResult.innerHTML = `<p class="result-empty">Trying…</p>`;
   try {
-    const res = await api(`/api/storage/cross-check?user=${encodeURIComponent(currentUser)}`);
+    const res = await api("/api/storage/cross-check");
     const cls = res.denied ? "denied" : "leaked";
     const line = res.denied
       ? `✓ DENIED — ${res.acting_org}'s credentials could not reach bucket "${res.bucket}" (discovered via MinIO's root ListBuckets, not owned by ${res.acting_org})`
@@ -336,6 +367,96 @@ async function runStorageCrossCheck() {
       </div>`;
   } catch (err) {
     storageCrossCheckResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Users tab
+// ---------------------------------------------------------------------
+let editingUsername = null;
+
+async function loadUsers() {
+  const [users, orgs] = await Promise.all([api("/api/users"), api("/api/organizations")]);
+  userOrgSelect.innerHTML = orgs.map((o) => `<option value="${o.id}">${o.label} (${o.id})</option>`).join("");
+
+  usersTableBody.innerHTML =
+    users
+      .map(
+        (u) => `
+      <tr data-username="${u.id}">
+        <td class="mono">${u.id}</td>
+        <td>${u.label}</td>
+        <td>${u.title || "—"}</td>
+        <td><span class="org-chip" title="${u.org_label}">${u.org}</span></td>
+        <td>${u.region}</td>
+        <td>${u.hr ? "yes" : "no"}</td>
+        <td>${u.groups.join(", ") || "—"}</td>
+        <td class="users-row-actions">
+          <button type="button" class="btn btn-allow btn-sm" data-action="edit">Edit</button>
+          <button type="button" class="btn btn-deny btn-sm" data-action="delete">Delete</button>
+        </td>
+      </tr>`
+      )
+      .join("") || `<tr><td colspan="8">No users yet.</td></tr>`;
+
+  usersTableBody.querySelectorAll("[data-action='edit']").forEach((btn) => {
+    btn.addEventListener("click", () => openEditUser(btn.closest("tr").dataset.username, users));
+  });
+  usersTableBody.querySelectorAll("[data-action='delete']").forEach((btn) => {
+    btn.addEventListener("click", () => deleteUser(btn.closest("tr").dataset.username));
+  });
+}
+
+function openCreateUser() {
+  editingUsername = null;
+  userForm.reset();
+  userFormTitle.textContent = "New user";
+  userUsername.disabled = false;
+  userPassword.required = true;
+  userPassword.placeholder = "";
+  userForm.hidden = false;
+  userUsername.focus();
+}
+
+function openEditUser(username, users) {
+  const u = users.find((x) => x.id === username);
+  if (!u) return;
+  editingUsername = username;
+  userForm.reset();
+  userFormTitle.textContent = `Edit ${username}`;
+  userUsername.value = username;
+  userUsername.disabled = true;
+  userPassword.required = false;
+  userPassword.placeholder = "leave blank to keep the current password";
+  const [first, ...rest] = u.label.split(" ");
+  userFirstName.value = first || username;
+  userLastName.value = rest.join(" ");
+  userTitle.value = u.title;
+  userOrgSelect.value = u.org;
+  userRegion.value = u.region;
+  userHr.checked = u.hr;
+  userGroupsInput.value = u.groups.join(", ");
+  userForm.hidden = false;
+  userFirstName.focus();
+}
+
+function closeUserForm() {
+  userForm.hidden = true;
+  userForm.reset();
+  editingUsername = null;
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Delete ${username}? This removes their Keycloak account and every policy grant naming them directly.`)) {
+    return;
+  }
+  usersStatus.textContent = `Deleting ${username}…`;
+  try {
+    await api(`/api/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+    usersStatus.textContent = `Deleted ${username}.`;
+    await Promise.all([loadUsers(), loadPolicyOptions(), loadAirflowPolicyOptions()]);
+  } catch (err) {
+    usersStatus.textContent = `Error: ${err.message}`;
   }
 }
 
@@ -356,7 +477,7 @@ function renderServices() {
             <span class="size">${svc.desc || ""} — internal only, not reachable from a browser</span>
           </div>`;
       }
-      const url = `${svc.tcp ? "" : proto + "//"}${host}:${svc.port}${svc.tcp ? "" : svc.path || "/"}`;
+      const url = `${svc.tcp ? "" : (svc.scheme || proto) + "//"}${host}:${svc.port}${svc.tcp ? "" : svc.path || "/"}`;
       const link = svc.tcp
         ? `<span class="name">${url}</span>`
         : `<a class="name" href="${url}" target="_blank" rel="noopener">${url}</a>`;
@@ -374,33 +495,11 @@ function renderServices() {
 // ---------------------------------------------------------------------
 async function renderCredentials() {
   const creds = window.CREDENTIALS || DEFAULT_CREDENTIALS;
-  const logCmd = window.AIRFLOW_LOG_CMD || DEFAULT_AIRFLOW_LOG_CMD;
-
-  // Live Airflow passwords, read by the backend straight out of the
-  // running apiserver pod's own logs (see /api/airflow/credentials and
-  // app/airflow_client.py) — falls back to log-fetch instructions when
-  // that's unavailable (e.g. running under plain docker-compose).
-  let livePasswords = {};
-  try {
-    const res = await api("/api/airflow/credentials");
-    if (res.available) livePasswords = res.passwords || {};
-  } catch (err) {
-    // backend unreachable or endpoint missing — fall back silently
-  }
 
   const rows = creds
     .map((c) => {
       const userCell = c.user ? `<code>${c.user}</code>` : `<span class="hint-inline">n/a</span>`;
-      let passCell;
-      if (c.pass) {
-        passCell = `<code>${c.pass}</code>`;
-      } else if (c.service === "Airflow" && livePasswords[c.user]) {
-        passCell = `<code>${livePasswords[c.user]}</code>`;
-      } else if (c.service === "Airflow") {
-        passCell = `<span class="hint-inline">generated at startup — <code>${logCmd}</code></span>`;
-      } else {
-        passCell = `<span class="hint-inline">n/a</span>`;
-      }
+      const passCell = c.pass ? `<code>${c.pass}</code>` : `<span class="hint-inline">n/a</span>`;
       return `<tr><td>${c.service}</td><td>${userCell}</td><td>${passCell}</td><td>${c.notes}</td></tr>`;
     })
     .join("");
@@ -417,21 +516,7 @@ async function renderCredentials() {
 // ---------------------------------------------------------------------
 // Event wiring
 // ---------------------------------------------------------------------
-userSelect.addEventListener("change", async () => {
-  currentUser = userSelect.value;
-  const users = await api("/api/users");
-  renderUserGroups(users);
-  resultEl.innerHTML = `<p class="result-empty">Pick a table on the left to see what OPA decides.</p>`;
-  await loadCatalog();
-  if (!document.getElementById("tab-airflow").hidden) {
-    await loadAirflowDags();
-  }
-  if (!document.getElementById("tab-storage").hidden) {
-    await loadStorageFiles();
-    storageCrossCheckResult.innerHTML = "";
-    storagePreview.innerHTML = `<p class="result-empty">Click a file on the left to preview it.</p>`;
-  }
-});
+logoutBtn.addEventListener("click", () => keycloak.logout());
 
 storageCrossCheckBtn.addEventListener("click", runStorageCrossCheck);
 
@@ -474,8 +559,70 @@ airflowGrantForm.addEventListener("submit", async (e) => {
   }
 });
 
+userNewBtn.addEventListener("click", () => {
+  if (userForm.hidden) {
+    openCreateUser();
+  } else {
+    closeUserForm();
+  }
+});
+
+userFormCancel.addEventListener("click", closeUserForm);
+
+userForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const groups = userGroupsInput.value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fields = {
+    first_name: userFirstName.value.trim(),
+    last_name: userLastName.value.trim(),
+    title: userTitle.value.trim(),
+    org: userOrgSelect.value,
+    region: userRegion.value.trim(),
+    hr: userHr.checked,
+    groups,
+  };
+  if (userPassword.value) fields.password = userPassword.value;
+
+  try {
+    if (editingUsername) {
+      // Blank email here just means "leave it as whatever Keycloak already
+      // has" — GET /api/users never returns it, so there's nothing to
+      // prefill the field with in the first place.
+      if (userEmail.value.trim()) fields.email = userEmail.value.trim();
+      await api(`/api/users/${encodeURIComponent(editingUsername)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      });
+      usersStatus.textContent = `Updated ${editingUsername}.`;
+    } else {
+      const username = userUsername.value.trim();
+      fields.email = userEmail.value.trim();
+      await api("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, ...fields }),
+      });
+      usersStatus.textContent = `Created ${username} — they can log in to Keycloak with the password you set.`;
+    }
+    closeUserForm();
+    await Promise.all([loadUsers(), loadPolicyOptions(), loadAirflowPolicyOptions()]);
+  } catch (err) {
+    usersStatus.textContent = `Error: ${err.message}`;
+  }
+});
+
 (async function init() {
-  await loadUsers();
+  // login-required: keycloak.init() itself redirects the browser to
+  // Keycloak's own login page if there's no valid session yet, so
+  // nothing below runs until a real Keycloak user has authenticated.
+  const authenticated = await keycloak.init({ onLoad: "login-required", pkceMethod: "S256" });
+  if (!authenticated) return;
+
+  await loadCurrentUser();
   await loadPolicyOptions();
   await loadAirflowPolicyOptions();
   await refreshAll();

@@ -6,7 +6,11 @@ inheritance, and a user with no policy at all (default deny).
 
 These are plain data structures — the authz database (see db.py) is the
 actual system of record once the backend starts; this module only supplies
-the initial seed and the static demo-user directory shown in the UI.
+the initial seed for the five demo identities below. Users created live
+through the Users tab (see main.py's /api/users CRUD and
+keycloak_admin.py) live only in the authz database and Keycloak — never
+here, since this file ships with the image and isn't something a running
+container can write back to.
 """
 
 # Two organizations — separate tenants, not just separate resources. Every
@@ -146,11 +150,6 @@ INITIAL_POLICIES = [
     ("grp_data_eng", "airflow.dag.org2_etl", "view_logs"),
     ("grp_data_eng", "airflow.dag.org2_etl", "view_code"),
 ]
-
-
-def all_known_subjects():
-    groups = sorted({g for _, g in GROUP_MEMBERSHIP})
-    return list(DEMO_USERS.keys()) + groups
 
 
 def all_known_resources():

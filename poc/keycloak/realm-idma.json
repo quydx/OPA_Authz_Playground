@@ -1,0 +1,138 @@
+{
+  "realm": "idma",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginTheme": "keycloak",
+  "accessTokenLifespan": 1800,
+  "clients": [
+    {
+      "clientId": "idma-frontend",
+      "name": "IDMA POC frontend",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000", "+"],
+      "protocolMappers": [
+        {
+          "name": "trino-audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "trino",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "trino-webui",
+      "name": "Trino Web UI (browser OAuth2 login)",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "secret": "trino-webui-secret",
+      "redirectUris": ["https://localhost:8443/oauth2/callback"],
+      "webOrigins": ["https://localhost:8443"]
+    },
+    {
+      "clientId": "airflow-webserver",
+      "name": "Airflow (FabAuthManager OAuth login)",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "secret": "airflow-webserver-secret",
+      "redirectUris": ["http://localhost:8082/auth/oauth-authorized/keycloak"],
+      "webOrigins": ["http://localhost:8082"]
+    },
+    {
+      "clientId": "idma-backend-admin",
+      "name": "Backend's own Keycloak admin service account (Users CRUD)",
+      "enabled": true,
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "idma-backend-admin-secret"
+    }
+  ],
+  "groups": [
+    {"name": "grp_data_eng"},
+    {"name": "grp_hr"}
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Nguyen",
+      "email": "alice@acme-retail.example",
+      "groups": ["/grp_data_eng"],
+      "credentials": [{"type": "password", "value": "alice", "temporary": false}]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Tran",
+      "email": "bob@acme-retail.example",
+      "credentials": [{"type": "password", "value": "bob", "temporary": false}]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Le",
+      "email": "carol@acme-retail.example",
+      "groups": ["/grp_hr"],
+      "credentials": [{"type": "password", "value": "carol", "temporary": false}]
+    },
+    {
+      "username": "dave",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Dave",
+      "lastName": "Pham",
+      "email": "dave@acme-retail.example",
+      "credentials": [{"type": "password", "value": "dave", "temporary": false}]
+    },
+    {
+      "username": "erin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Erin",
+      "lastName": "Solberg",
+      "email": "erin@globex-logistics.example",
+      "groups": ["/grp_data_eng"],
+      "credentials": [{"type": "password", "value": "erin", "temporary": false}]
+    },
+    {
+      "username": "service-account-idma-backend-admin",
+      "enabled": true,
+      "serviceAccountClientId": "idma-backend-admin",
+      "clientRoles": {
+        "realm-management": ["manage-users", "view-users"]
+      }
+    }
+  ]
+}

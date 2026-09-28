@@ -237,6 +237,15 @@ table tr:last-child td { border-bottom: none; }
 .btn-deny:hover { background: var(--deny); color: #fff; }
 .grant-status { min-height: 1.2em; margin-top: 10px; font-size: 0.85rem; color: var(--ink-soft); }
 
+/* users tab */
+.users-toolbar { margin-bottom: 14px; }
+.users-row-actions { display: flex; gap: 6px; white-space: nowrap; }
+.btn-sm { padding: 5px 12px; font-size: 0.78rem; }
+.user-form { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+.user-form h3 { flex-basis: 100%; }
+.user-form-checkbox { flex-direction: row !important; align-items: center; gap: 8px !important; }
+.user-form-checkbox input { min-width: 0; width: 18px; height: 18px; }
+
 /* architecture tab */
 .arch-svg-wrap { width: 100%; overflow-x: auto; }
 .arch-svg-wrap svg { width: 100%; height: auto; min-width: 760px; display: block; }
