@@ -18,6 +18,11 @@ const grantObj = document.getElementById("grant-obj");
 const grantStatus = document.getElementById("grant-status");
 
 const dagList = document.getElementById("dag-list");
+const modelList = document.getElementById("model-list");
+const modelInvokeForm = document.getElementById("model-invoke-form");
+const modelInvokeSelect = document.getElementById("model-invoke-select");
+const modelInvokeRows = document.getElementById("model-invoke-rows");
+const modelInvokeResult = document.getElementById("model-invoke-result");
 const airflowGrantForm = document.getElementById("airflow-grant-form");
 const airflowGrantSub = document.getElementById("airflow-grant-sub");
 const airflowGrantObj = document.getElementById("airflow-grant-obj");
@@ -58,13 +63,14 @@ let currentUser = null;
 // via the same Keycloak realm as the frontend now — see the "Keycloak" row
 // — rather than having their own separate credentials.
 const DEFAULT_CREDENTIALS = [
-  { service: "Postgres", user: "poc", pass: "pocpass", notes: "one instance, three databases: authz, demo, airflow" },
+  { service: "Postgres", user: "poc", pass: "pocpass", notes: "one instance, four databases: authz, demo, airflow, mlflow" },
   { service: "MinIO (console / admin)", user: "pocadmin", pass: "pocadminpass", notes: "full admin — MinIO Console login" },
   { service: "MinIO — org-001 (Acme Retail)", user: "org001svc", pass: "org001SecretKey123", notes: "scoped to org-001's bucket only — native MinIO IAM, no OPA involved" },
   { service: "MinIO — org-002 (Globex Logistics)", user: "org002svc", pass: "org002SecretKey456", notes: "scoped to org-002's bucket only" },
   { service: "Trino", user: null, pass: null, notes: "authenticates the caller's Keycloak JWT itself — Web UI via OAuth2 SSO, API/JDBC via a bearer token; trino.rego then decides what that caller can do" },
   { service: "Airflow", user: null, pass: null, notes: "logs in via the same Keycloak realm (FabAuthManager OAuth) — every Keycloak user is auto-provisioned on first login with the same flat role; Dag-level access is still decided by OPA, not this role" },
   { service: "OPA", user: null, pass: null, notes: "no authentication — internal service only" },
+  { service: "MLflow", user: null, pass: null, notes: "no authentication — tracking server + Model Registry UI/API" },
   { service: "Keycloak", user: "alice / bob / carol / dave / erin", pass: "same as username", notes: "authentication service — realm \"idma\"; admin console login is admin/admin" },
 ];
 
@@ -80,6 +86,7 @@ const DEFAULT_SERVICES = [
   { name: "MinIO API", port: 9000, path: "/", desc: "S3 endpoint" },
   { name: "MinIO Console", port: 9001, path: "/", desc: "browser UI" },
   { name: "OPA", port: 8181, path: "/health", desc: "policy engine" },
+  { name: "MLflow", port: 5000, path: "/", desc: "tracking server UI + Model Registry" },
   { name: "Postgres", port: 5433, desc: "authz · demo · airflow DBs", tcp: true },
 ];
 
@@ -110,6 +117,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
     document.getElementById("tab-catalog").hidden = btn.dataset.tab !== "catalog";
     document.getElementById("tab-airflow").hidden = btn.dataset.tab !== "airflow";
+    document.getElementById("tab-models").hidden = btn.dataset.tab !== "models";
     document.getElementById("tab-storage").hidden = btn.dataset.tab !== "storage";
     document.getElementById("tab-users").hidden = btn.dataset.tab !== "users";
     document.getElementById("tab-architecture").hidden = btn.dataset.tab !== "architecture";
@@ -124,6 +132,9 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     if (btn.dataset.tab === "airflow") {
       loadAirflowDags();
       loadAirflowPolicies();
+    }
+    if (btn.dataset.tab === "models") {
+      loadModels();
     }
     if (btn.dataset.tab === "storage") {
       loadStorageFiles();
@@ -289,6 +300,73 @@ async function loadAirflowPolicyOptions() {
   airflowGrantSub.innerHTML = opts.subjects.map((s) => `<option value="${s}">${s}</option>`).join("");
   airflowGrantObj.innerHTML = opts.resources.map((r) => `<option value="${r}">${r}</option>`).join("");
   airflowGrantAct.innerHTML = opts.actions.map((a) => `<option value="${a}">${a}</option>`).join("");
+}
+
+// ---------------------------------------------------------------------
+// Models tab
+// ---------------------------------------------------------------------
+function formatTimestamp(ms) {
+  return ms ? new Date(ms).toLocaleString() : "—";
+}
+
+async function loadModels() {
+  const models = await api("/api/models");
+
+  modelList.innerHTML =
+    models
+      .map((model) => {
+        const versionRows = model.versions
+          .map((v) => {
+            const metrics = Object.entries(v.metrics)
+              .map(([k, val]) => `<span class="perm-chip allow">${k}=${Number(val).toFixed(4)}</span>`)
+              .join("");
+            const params = Object.entries(v.params)
+              .map(([k, val]) => `<span class="perm-chip deny">${k}=${val}</span>`)
+              .join("");
+            return `
+          <div class="model-version-row ${v.deployed ? "deployed" : ""}" data-model="${model.name}" data-version="${v.version}">
+            <div class="dag-head">
+              <span class="name">v${v.version} <span class="mono hint-inline">${v.run_id.slice(0, 8)}</span></span>
+              ${v.deployed ? '<span class="org-chip" title="currently serving /invoke">DEPLOYED</span>' : ""}
+            </div>
+            <p class="dag-desc">trained ${formatTimestamp(v.created_at)}</p>
+            <div class="perm-chips">${metrics}${params}</div>
+            <div class="grant-actions model-version-actions">
+              <button type="button" class="btn ${v.deployed ? "btn-deny" : "btn-allow"} btn-sm" data-action="deploy" ${v.deployed ? "disabled" : ""}>
+                ${v.deployed ? "Deployed" : "Deploy"}
+              </button>
+            </div>
+          </div>`;
+          })
+          .join("");
+        return `
+        <div class="model-block">
+          <div class="schema-head">
+            <span>${model.name}</span>
+            <span class="hint-inline">${model.versions.length} version(s)${model.deployed_version ? `, v${model.deployed_version} deployed` : ", none deployed"}</span>
+          </div>
+          ${versionRows}
+        </div>`;
+      })
+      .join("") ||
+    `<p class="result-empty">No models trained yet — run the <code>train_sample_model</code> Dag on the Airflow Jobs tab.</p>`;
+
+  modelList.querySelectorAll("[data-action='deploy']").forEach((btn) => {
+    btn.addEventListener("click", () => deployModelVersion(btn.closest(".model-version-row").dataset.model, btn.closest(".model-version-row").dataset.version));
+  });
+
+  modelInvokeSelect.innerHTML =
+    models.map((m) => `<option value="${m.name}">${m.name}${m.deployed_version ? ` (v${m.deployed_version})` : " (not deployed)"}</option>`).join("") ||
+    `<option value="">— no models —</option>`;
+}
+
+async function deployModelVersion(name, version) {
+  try {
+    await api(`/api/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}/deploy`, { method: "POST" });
+    await loadModels();
+  } catch (err) {
+    modelInvokeResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -556,6 +634,32 @@ airflowGrantForm.addEventListener("submit", async (e) => {
     await Promise.all([loadAirflowDags(), loadAirflowPolicies()]);
   } catch (err) {
     airflowGrantStatus.textContent = `Error: ${err.message}`;
+  }
+});
+
+modelInvokeForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = modelInvokeSelect.value;
+  if (!name) return;
+  let rows;
+  try {
+    rows = JSON.parse(modelInvokeRows.value);
+  } catch (err) {
+    modelInvokeResult.innerHTML = `<div class="result-decision deny">✕ Feature rows must be valid JSON, e.g. [[5.1, 3.5, 1.4, 0.2]]</div>`;
+    return;
+  }
+  modelInvokeResult.innerHTML = `<p class="result-empty">Running…</p>`;
+  try {
+    const res = await api(`/api/models/${encodeURIComponent(name)}/invoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows }),
+    });
+    modelInvokeResult.innerHTML = `
+      <div class="result-decision allow">${res.model} v${res.version}</div>
+      <pre class="file-preview">${JSON.stringify(res.predictions)}</pre>`;
+  } catch (err) {
+    modelInvokeResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
   }
 });
 

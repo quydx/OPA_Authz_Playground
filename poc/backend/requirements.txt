@@ -7,3 +7,14 @@ pydantic==2.13.5
 boto3==1.43.91
 kubernetes==31.0.0
 PyJWT[crypto]==2.10.1
+# Models tab (app/mlflow_client.py) — client-only, same reasoning as
+# airflow/requirements.txt: talks to the mlflow service over HTTP, never
+# runs the tracking server itself. Versions pinned to match exactly what
+# the Airflow training image ships (see airflow/Dockerfile and its base
+# apache/airflow:3.0.6 image) so a model pickled there unpickles cleanly
+# here with no dependency-mismatch warnings.
+mlflow-skinny==3.16.1
+scikit-learn==1.7.1
+numpy==1.26.4
+pandas==2.1.4
+pyarrow==18.1.0

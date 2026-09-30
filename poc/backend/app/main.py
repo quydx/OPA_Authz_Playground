@@ -4,7 +4,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from app import db, keycloak_admin, opa_client, storage_client
+from app import db, keycloak_admin, mlflow_client, opa_client, storage_client
 from app.auth import AuthedUser, get_current_user
 from app.seed import (
     AIRFLOW_ACTIONS,
@@ -42,6 +42,7 @@ def on_startup():
     # startup so it's never serving stale/empty data after a restart.
     opa_client.push_policy_data(db.get_policy_data())
     threading.Thread(target=wait_for_trino, daemon=True).start()
+    threading.Thread(target=mlflow_client.load_deployed_models, daemon=True).start()
 
 
 @app.get("/api/health")
@@ -359,3 +360,38 @@ def revoke_policy(req: PolicyRequest, current: AuthedUser = Depends(get_current_
     removed = db.remove_policy(req.sub, req.obj, req.act)
     opa_client.push_policy_data(db.get_policy_data())
     return {"ok": True, "removed": removed}
+
+
+@app.get("/api/models")
+def list_models(current: AuthedUser = Depends(get_current_user)):
+    """Every model MLflow's Model Registry knows about, every version of
+    each, and which one (if any) is deployed — see mlflow_client.py. No
+    OPA check here: unlike the Data Catalog/Airflow tabs this isn't
+    modeling per-org data access, just what's been trained."""
+    try:
+        return mlflow_client.list_models()
+    except Exception as err:  # noqa: BLE001 — surfaced to the demo UI verbatim
+        raise HTTPException(status_code=502, detail=f"MLflow request failed: {err}") from err
+
+
+@app.post("/api/models/{name}/versions/{version}/deploy")
+def deploy_model(name: str, version: str, current: AuthedUser = Depends(get_current_user)):
+    try:
+        return mlflow_client.deploy_model_version(name, version)
+    except Exception as err:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"MLflow deploy failed: {err}") from err
+
+
+class ModelInvokeRequest(BaseModel):
+    rows: list[list[float]]  # feature vectors, same column order as training
+
+
+@app.post("/api/models/{name}/invoke")
+def invoke_model(name: str, req: ModelInvokeRequest, current: AuthedUser = Depends(get_current_user)):
+    try:
+        predictions = mlflow_client.invoke(name, req.rows)
+    except LookupError as err:
+        raise HTTPException(status_code=404, detail=str(err)) from err
+    except Exception as err:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Inference failed: {err}") from err
+    return {"model": name, "version": mlflow_client.get_deployed_version(name), "predictions": predictions}

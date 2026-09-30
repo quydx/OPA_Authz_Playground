@@ -65,6 +65,7 @@ RESOURCE_ORG = {
     "airflow.dag.hr_payroll_sync": "org-001",
     "airflow.dag.customer_export": "org-001",
     "airflow.dag.org2_etl": "org-002",
+    "airflow.dag.train_sample_model": "org-001",
 }
 
 # Storage isolation — the one guarantee in this POC that OPA never
@@ -114,6 +115,10 @@ AIRFLOW_DAGS = {
         "label": "Org2 ETL",
         "description": "Nightly load of org2_sales.orders from the source system",
     },
+    "train_sample_model": {
+        "label": "Train Sample Model",
+        "description": "Trains a sample iris classifier and registers it in MLflow",
+    },
 }
 
 # The action vocabulary opa_auth_manager maps Airflow's (method,
@@ -138,6 +143,11 @@ INITIAL_POLICIES = [
 
     ("bob", "airflow.dag.customer_export", "view"),  # direct grant, view only
     # dave gets nothing here either — same default deny, one layer up
+
+    ("grp_data_eng", "airflow.dag.train_sample_model", "view"),
+    ("grp_data_eng", "airflow.dag.train_sample_model", "trigger"),
+    ("grp_data_eng", "airflow.dag.train_sample_model", "view_logs"),
+    ("grp_data_eng", "airflow.dag.train_sample_model", "view_code"),
 
     # org-002's own grants — same group name (grp_data_eng) as org-001's,
     # same resource shape (a "sales" schema + its own ETL Dag), fully

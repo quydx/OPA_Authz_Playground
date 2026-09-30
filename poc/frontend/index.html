@@ -29,6 +29,7 @@
   <nav class="tabs">
     <button type="button" class="tab-btn active" data-tab="catalog">Data Catalog</button>
     <button type="button" class="tab-btn" data-tab="airflow">Airflow Jobs</button>
+    <button type="button" class="tab-btn" data-tab="models">Models</button>
     <button type="button" class="tab-btn" data-tab="storage">Storage</button>
     <button type="button" class="tab-btn" data-tab="users">Users</button>
     <button type="button" class="tab-btn" data-tab="architecture">Architecture</button>
@@ -139,6 +140,39 @@
         </div>
       </form>
       <p id="airflow-grant-status" class="grant-status"></p>
+    </section>
+  </main>
+
+  <main class="layout" id="tab-models" hidden>
+    <section class="panel models-panel">
+      <h2>Trained models</h2>
+      <p class="hint">
+        Live from MLflow's Model Registry (<code>GET /api/models</code>) — trained by the
+        <code>train_sample_model</code> Airflow Dag on the Jobs tab. Click <strong>Deploy</strong> on a version to
+        point the <code>production</code> alias at it and load it into the backend's in-memory serving cache.
+      </p>
+      <div id="model-list" class="model-list"></div>
+    </section>
+
+    <section class="panel model-invoke-panel">
+      <h2>Try the deployed model</h2>
+      <p class="hint">
+        Sends feature rows straight to <code>POST /api/models/&lt;name&gt;/invoke</code>, which runs
+        <code>predict()</code> on whichever version currently carries the <code>production</code> alias — the
+        same model object <code>train_sample_model</code> logged, loaded back with <code>mlflow.pyfunc</code>.
+      </p>
+      <form id="model-invoke-form" class="grant-form model-invoke-form">
+        <label>Model
+          <select id="model-invoke-select"></select>
+        </label>
+        <label class="model-invoke-rows-label">Feature rows (JSON array of arrays)
+          <textarea id="model-invoke-rows" rows="4">[[5.1, 3.5, 1.4, 0.2], [6.7, 3.1, 4.7, 1.5]]</textarea>
+        </label>
+        <div class="grant-actions">
+          <button type="submit" class="btn btn-allow">Run inference</button>
+        </div>
+      </form>
+      <div id="model-invoke-result" class="result-empty">Deploy a model version, then run inference here.</div>
     </section>
   </main>
 

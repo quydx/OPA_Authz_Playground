@@ -2,7 +2,12 @@ version: "3.8"
 
 x-airflow-common:
   &airflow-common
-  image: apache/airflow:3.0.6
+  # Built rather than pulled as-is — see airflow/Dockerfile — because the
+  # train_sample_model Dag needs mlflow, which the stock image doesn't
+  # carry. image: + build: together means every airflow-* service below
+  # shares one built image instead of rebuilding per service.
+  image: idma-airflow:local
+  build: ./airflow
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -22,7 +27,22 @@ x-airflow-common:
     AIRFLOW__FAB__SESSION_BACKEND: securecookie
     # Fixed so a session survives an apiserver restart — POC-only value.
     AIRFLOW__WEBSERVER__SECRET_KEY: poc-airflow-webserver-secret-key
+    # Separate from the secret_key above: signs/validates the internal
+    # Task Execution API's JWTs (used for every task-instance start/heartbeat
+    # handoff between the scheduler and the apiserver). Left unset, each
+    # container auto-generates its own random value on first use — the
+    # scheduler-signed token then never validates against the apiserver's
+    # own independently-generated secret, and every task fails immediately
+    # with "Signature verification failed" before it ever runs. Fixed here
+    # for the same reason as AIRFLOW__WEBSERVER__SECRET_KEY: POC-only value.
+    AIRFLOW__API_AUTH__JWT_SECRET: poc-airflow-jwt-secret
     OPA_URL: http://opa:8181
+    # train_sample_model's only mlflow-specific config — a tracking-server
+    # URL. Artifacts are proxied through that server (mlflow's
+    # --serve-artifacts mode — see mlflow/Dockerfile), so this container
+    # never needs its own MinIO credentials to log a model.
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    MLFLOW_DISABLE_AGENT_HINT: "1"
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins
@@ -35,6 +55,8 @@ x-airflow-common:
     opa:
       condition: service_started
     keycloak:
+      condition: service_started
+    mlflow:
       condition: service_started
 
 services:
@@ -63,6 +85,33 @@ services:
     ports:
       - "8181:8181"
 
+  # MLflow tracking server + Model Registry — backend store is its own
+  # Postgres database (see postgres/init/05-create-mlflow-db.sql), same
+  # "one instance, separate database" pattern as authz/demo/airflow.
+  # --serve-artifacts (mlflow/Dockerfile) proxies every artifact
+  # upload/download through this server, so it's the only thing in the
+  # whole stack that holds the MinIO mlflowsvc credential — the Airflow
+  # training Dag and the backend's model-serving code only ever need this
+  # server's HTTP URL, never MinIO directly.
+  mlflow:
+    build: ./mlflow
+    environment:
+      # +psycopg2 explicit for the same reason AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+      # is above: SQLAlchemy's bare "postgresql://" now prefers the psycopg
+      # (v3) driver, which isn't installed here — only psycopg2-binary is.
+      MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://poc:pocpass@postgres:5432/mlflow
+      MLFLOW_ARTIFACT_ROOT: s3://mlflow-artifacts/
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: mlflowsvc
+      AWS_SECRET_ACCESS_KEY: mlflowSecretKey789
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
   # Authentication service (see IDMA Authen & Authz.MD — "IDMA use Keycloak
   # as Authentication service"). Dev mode (KC_DB unset -> dev-file), no
   # volume mounted for its data directory — every container recreate
@@ -70,7 +119,11 @@ services:
   # idempotent-by-design spirit as minio/init.sh. Demo users
   # (alice/bob/carol/dave/erin) all have password == username.
   keycloak:
-    image: quay.io/keycloak/keycloak:25.0.6
+    # Bumped from 25.0.6 -> 26.4.5 to match the SPI version the VNPT CAS
+    # provider jar below was built against (keycloak-cas-26.4.5-vnpt-*.jar).
+    # A cross-major mismatch here is the most common cause of a provider
+    # failing to load on start-dev's automatic build step.
+    image: quay.io/keycloak/keycloak:26.4.5
     command: ["start-dev", "--import-realm"]
     environment:
       KEYCLOAK_ADMIN: admin
@@ -82,6 +135,13 @@ services:
       KC_HTTP_ENABLED: "true"
     volumes:
       - ./keycloak/realm-idma.json:/opt/keycloak/data/import/realm-idma.json:ro
+      # VNPT CAS identity-broker plugin (see keycloak/README or the jar's
+      # own META-INF/services) — dropped into providers/ so start-dev's
+      # automatic build step picks it up. Optional HRM-enrichment env vars
+      # (JDBC_URL/JDBC_USERNAME/JDBC_PASSWORD/JDBC_SCHEMA, HIKARI_*,
+      # HRM_UNIT_GROUP_MAPPINGS) are intentionally unset — the plugin runs
+      # in fallback mode (email = username@vnpt.vn) without them.
+      - ./keycloak/keycloak-cas-26.4.5-vnpt-1.1.6.jar:/opt/keycloak/providers/keycloak-cas-26.4.5-vnpt-1.1.6.jar:ro
     ports:
       - "8180:8080"
 
@@ -165,6 +225,13 @@ services:
       KEYCLOAK_REALM: idma
       KEYCLOAK_ADMIN_CLIENT_ID: idma-backend-admin
       KEYCLOAK_ADMIN_CLIENT_SECRET: idma-backend-admin-secret
+      # Models tab (app/mlflow_client.py): list registered models/versions,
+      # deploy one (set the "production" alias), and load+serve the
+      # currently-deployed model in-process. Artifacts come back proxied
+      # through this URL (mlflow's --serve-artifacts mode) — the backend
+      # never talks to MinIO for this, same reasoning as the Airflow Dag.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_DISABLE_AGENT_HINT: "1"
     ports:
       - "8001:8000"
     depends_on:
@@ -177,6 +244,8 @@ services:
       minio-init:
         condition: service_completed_successfully
       keycloak:
+        condition: service_started
+      mlflow:
         condition: service_started
 
   frontend:

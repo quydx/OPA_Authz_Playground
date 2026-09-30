@@ -43,4 +43,25 @@ mc admin policy attach local org-002-policy --user org002svc || true
 mc cp --recursive /seed-files/org-001/ local/org-001/
 mc cp --recursive /seed-files/org-002/ local/org-002/
 
+# MLflow's artifact store — one bucket, one scoped user, same shape as the
+# per-org buckets above (least-privilege credential, not the root user).
+# Both the mlflow tracking server and anything logging/loading a model
+# (the Airflow training DAG, the backend's model-serving cache) use this
+# same credential — see docker-compose.yml's MLFLOW_S3_ENDPOINT_URL /
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars.
+mc mb --ignore-existing local/mlflow-artifacts
+
+cat > /tmp/mlflow-artifacts-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::mlflow-artifacts"]},
+    {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], "Resource": ["arn:aws:s3:::mlflow-artifacts/*"]}
+  ]
+}
+EOF
+mc admin user add local mlflowsvc mlflowSecretKey789 || true
+mc admin policy create local mlflow-artifacts-policy /tmp/mlflow-artifacts-policy.json || true
+mc admin policy attach local mlflow-artifacts-policy --user mlflowsvc || true
+
 echo "minio-init: buckets, scoped users, and sample files ready."

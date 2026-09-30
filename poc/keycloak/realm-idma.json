@@ -5,6 +5,24 @@
   "registrationAllowed": false,
   "loginTheme": "keycloak",
   "accessTokenLifespan": 1800,
+  "identityProviders": [
+    {
+      "alias": "vnpt-cas",
+      "displayName": "VNPT",
+      "providerId": "cas",
+      "enabled": true,
+      "trustEmail": false,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "casServerUrlPrefix": "https://id.vnpt.com.vn/cas",
+        "gateway": "false",
+        "renew": "false",
+        "redirectToCasServerAfterLogout": "true"
+      }
+    }
+  ],
   "clients": [
     {
       "clientId": "idma-frontend",
