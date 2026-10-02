@@ -89,11 +89,6 @@ h1, h2, h3 { margin: 0; font-family: "IBM Plex Sans Condensed", "IBM Plex Sans",
 .layout[hidden] { display: none; }
 .catalog-panel { grid-row: 1; }
 .result-panel { grid-row: 1; }
-.policy-panel { grid-column: 1 / -1; grid-row: 2; }
-
-#tab-airflow.layout { grid-template-columns: 1.2fr 1.3fr; grid-template-rows: auto; }
-.dags-panel { grid-row: 1; }
-.airflow-policy-panel { grid-row: 1; }
 
 #tab-storage.layout { grid-template-columns: 1fr 1.2fr; grid-template-rows: auto; }
 .storage-panel { grid-row: 1; }

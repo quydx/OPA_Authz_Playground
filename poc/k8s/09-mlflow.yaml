@@ -1,0 +1,79 @@
+# MLflow tracking server + Model Registry — backend store is its own
+# Postgres database (see 00-configmap-postgres-init.yaml's
+# 05-create-mlflow-db.sql), same "one instance, separate database" pattern
+# as authz/demo/airflow. --serve-artifacts (built into the image's CMD —
+# see poc/mlflow/Dockerfile) proxies every artifact upload/download through
+# this server, so it's the only workload in the whole stack that holds the
+# MinIO mlflowsvc credential — the Airflow training Dag and the backend's
+# model-serving code only ever need this server's HTTP URL, never MinIO
+# directly.
+#
+# image: must be built from poc/mlflow/Dockerfile and pushed to
+# ai-repository.vnpt.vn/idma/idma-poc-mlflow:latest before this Deployment
+# will actually pull successfully — same caveat as 08-airflow.yaml's image.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-mlflow
+  namespace: bigdata-dev
+  labels: {app: idma-mlflow, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: idma-mlflow}
+  template:
+    metadata:
+      labels: {app: idma-mlflow}
+    spec:
+      imagePullSecrets:
+        - name: ai-registry
+      containers:
+        - name: mlflow
+          image: ai-repository.vnpt.vn/idma/idma-poc-mlflow:latest
+          env:
+            - {name: MLFLOW_BACKEND_STORE_URI, value: "postgresql+psycopg2://poc:pocpass@idma-postgres:5432/mlflow"}
+            - {name: MLFLOW_ARTIFACT_ROOT, value: "s3://mlflow-artifacts/"}
+            - {name: MLFLOW_S3_ENDPOINT_URL, value: "http://idma-minio:9000"}
+            - {name: AWS_ACCESS_KEY_ID, value: "mlflowsvc"}
+            - {name: AWS_SECRET_ACCESS_KEY, value: "mlflowSecretKey789"}
+            # Overrides the image's docker-compose-flavored default (see
+            # poc/mlflow/Dockerfile) — mlflow 3.x's DNS-rebinding protection
+            # rejects any request whose Host header isn't on this list, and
+            # every other pod reaches this one via its Service DNS name,
+            # not "mlflow".
+            - {name: MLFLOW_ALLOWED_HOSTS, value: "idma-mlflow,idma-mlflow:5000,localhost,localhost:5000"}
+            # mlflow's own default of 4 workers measured ~2GB RSS locally —
+            # way more than this lab deployment needs. 1 is plenty for the
+            # traffic this Models tab actually generates.
+            - {name: MLFLOW_WORKERS, value: "1"}
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet: {path: /health, port: 5000}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            # Measured directly (docker stats) rather than guessed: even a
+            # single worker sits around ~1.6Gi RSS — mlflow 3.x's full
+            # package (pandas/numpy/pyarrow/sqlalchemy/alembic + two
+            # always-on background schedulers for online-scoring and trace
+            # archival, neither of which this lab uses) has a heavy
+            # baseline regardless of --workers. 640Mi and 1536Mi both
+            # OOMKilled before this value.
+            requests: {cpu: "150m", memory: "768Mi"}
+            limits: {cpu: "500m", memory: "2048Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-mlflow
+  namespace: bigdata-dev
+  labels: {app: idma-mlflow, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: NodePort
+  selector: {app: idma-mlflow}
+  ports:
+    - port: 5000
+      targetPort: 5000
+      nodePort: 30500

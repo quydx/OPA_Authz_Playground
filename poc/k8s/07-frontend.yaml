@@ -14,17 +14,24 @@ data:
   # to the Services tab.
   config.js: |
     window.API_BASE = window.location.protocol + "//" + window.location.hostname + ":30801";
+    // Same reasoning as API_BASE above — Keycloak has no fixed hostname
+    // on this cluster (see 10-keycloak.yaml), so the login redirect has
+    // to target whichever node this page itself was loaded from.
+    window.KEYCLOAK_URL = window.location.protocol + "//" + window.location.hostname + ":30180";
+    window.KEYCLOAK_REALM = "idma";
+    window.KEYCLOAK_CLIENT_ID = "idma-frontend";
     window.SERVICES = [
       { name: "Frontend", port: 30300, path: "/", desc: "this UI" },
       { name: "Backend API", port: 30801, path: "/api/health", desc: "FastAPI" },
-      { name: "Trino", port: 30808, path: "/ui/", desc: "coordinator UI" },
-      { name: "Airflow", port: 30882, path: "/", desc: "webserver" },
+      { name: "Trino", port: 30843, scheme: "https:", path: "/ui/", desc: "coordinator UI — click to log in via Keycloak SSO (self-signed cert, browser will warn once)" },
+      { name: "Airflow", port: 30882, path: "/auth/login/keycloak?next=", desc: "webserver — click to log in via Keycloak SSO" },
       { name: "MinIO API", port: 30900, path: "/", desc: "S3 endpoint" },
       { name: "MinIO Console", port: 30901, path: "/", desc: "browser UI" },
+      { name: "MLflow", port: 30500, path: "/", desc: "tracking server UI + Model Registry" },
+      { name: "Keycloak", port: 30180, path: "/admin/master/console/", desc: "authentication service — realm \"idma\"" },
       { name: "OPA", desc: "policy engine — ClusterIP only" },
-      { name: "Postgres", desc: "authz · demo · airflow DBs — ClusterIP only" },
+      { name: "Postgres", desc: "authz · demo · airflow · mlflow DBs — ClusterIP only" },
     ];
-    window.AIRFLOW_LOG_CMD = 'kubectl logs -n bigdata-dev -l app=idma-airflow-apiserver | grep "Password for user"';
 ---
 apiVersion: apps/v1
 kind: Deployment

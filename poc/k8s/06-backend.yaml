@@ -54,6 +54,10 @@ spec:
         - name: ai-registry
       containers:
         - name: backend
+          # Rebuild and repush this image after the auth.py change making
+          # issuer validation conditional (see KEYCLOAK_ISSUER below) —
+          # the running pod otherwise keeps the old, always-enforced
+          # behavior baked into whatever image is already deployed.
           image: ai-repository.vnpt.vn/idma/idma-poc-backend:latest
           env:
             - {name: AUTHZ_DB_URL, value: "postgresql://poc:pocpass@idma-postgres:5432/authz"}
@@ -63,6 +67,21 @@ spec:
             - {name: TRINO_CATALOG, value: "postgres"}
             - {name: MINIO_ENDPOINT, value: "http://idma-minio:9000"}
             - {name: K8S_NAMESPACE, value: "bigdata-dev"}
+            # Models tab (app/mlflow_client.py) — list/deploy/invoke registered
+            # models. Artifacts come back proxied through this URL (mlflow's
+            # --serve-artifacts mode, see 09-mlflow.yaml), so the backend
+            # never needs its own MinIO credentials for this.
+            - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
+            - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
+            # Keycloak (see 10-keycloak.yaml). JWKS/admin-API calls are
+            # server-to-server, so they use the stable in-cluster Service
+            # DNS name regardless of which node a browser used. ISSUER is
+            # deliberately empty — see auth.py's comment and
+            # 10-keycloak.yaml's for why this cluster has no one fixed
+            # issuer string to check tokens against.
+            - {name: KEYCLOAK_ISSUER, value: ""}
+            - {name: KEYCLOAK_JWKS_URL, value: "http://idma-keycloak:8080/realms/idma/protocol/openid-connect/certs"}
+            - {name: KEYCLOAK_ADMIN_BASE_URL, value: "http://idma-keycloak:8080"}
           ports:
             - containerPort: 8000
           readinessProbe:

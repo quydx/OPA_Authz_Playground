@@ -366,7 +366,7 @@ def revoke_policy(req: PolicyRequest, current: AuthedUser = Depends(get_current_
 def list_models(current: AuthedUser = Depends(get_current_user)):
     """Every model MLflow's Model Registry knows about, every version of
     each, and which one (if any) is deployed — see mlflow_client.py. No
-    OPA check here: unlike the Data Catalog/Airflow tabs this isn't
+    OPA check here: unlike the Data Catalog/Airflow tabs this is
     modeling per-org data access, just what's been trained."""
     try:
         return mlflow_client.list_models()

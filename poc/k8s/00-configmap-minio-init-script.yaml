@@ -46,6 +46,25 @@ data:
     mc cp --recursive /seed-files/org-001/ local/org-001/
     mc cp --recursive /seed-files/org-002/ local/org-002/
 
+    # MLflow's artifact store — one bucket, one scoped user, same shape as
+    # the per-org buckets above. Both the mlflow tracking server and
+    # anything logging/loading a model use this credential — see
+    # 09-mlflow.yaml's AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+    mc mb --ignore-existing local/mlflow-artifacts
+
+    cat > /tmp/mlflow-artifacts-policy.json << 'EOF'
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::mlflow-artifacts"]},
+        {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], "Resource": ["arn:aws:s3:::mlflow-artifacts/*"]}
+      ]
+    }
+    EOF
+    mc admin user add local mlflowsvc mlflowSecretKey789 || true
+    mc admin policy create local mlflow-artifacts-policy /tmp/mlflow-artifacts-policy.json || true
+    mc admin policy attach local mlflow-artifacts-policy --user mlflowsvc || true
+
     echo "minio-init: buckets, scoped users, and sample files ready."
 kind: ConfigMap
 metadata:

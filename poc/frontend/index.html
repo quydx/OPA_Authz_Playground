@@ -29,6 +29,7 @@
   <nav class="tabs">
     <button type="button" class="tab-btn active" data-tab="catalog">Data Catalog</button>
     <button type="button" class="tab-btn" data-tab="airflow">Airflow Jobs</button>
+    <button type="button" class="tab-btn" data-tab="policies">Policies</button>
     <button type="button" class="tab-btn" data-tab="models">Models</button>
     <button type="button" class="tab-btn" data-tab="storage">Storage</button>
     <button type="button" class="tab-btn" data-tab="users">Users</button>
@@ -48,7 +49,22 @@
       <h2>Result</h2>
       <div id="result" class="result-empty">Pick a table on the left to see what OPA decides.</div>
     </section>
+  </main>
 
+  <main class="layout-single" id="tab-airflow" hidden>
+    <section class="panel dags-panel">
+      <h2>Jobs (Dags)</h2>
+      <p class="hint">
+        One permission chip per action Airflow's Auth Manager checks per Dag — <code>view</code>, <code>trigger</code>,
+        <code>view_logs</code>, <code>view_code</code>. Every chip here is the same <code>data.app.allow</code> OPA
+        decision that <code>opa_auth_manager</code> makes natively inside Airflow itself via
+        <code>data.airflow.allow</code> — this tab never talks to Airflow, it previews the policy.
+      </p>
+      <div id="dag-list" class="dag-list"></div>
+    </section>
+  </main>
+
+  <main class="layout-single" id="tab-policies" hidden>
     <section class="panel policy-panel">
       <h2>Policy inspector</h2>
       <p class="hint">Live contents of the authz database — pushed into OPA after every change.</p>
@@ -72,7 +88,7 @@
       </div>
 
       <h2 class="grant-title">Live demo: grant / revoke</h2>
-      <p class="hint">Change a policy, then click a table again on the left — no restart needed.</p>
+      <p class="hint">Change a policy, then click a table again on the Data Catalog tab — no restart needed.</p>
       <form id="grant-form" class="grant-form">
         <label>Subject
           <select id="grant-sub"></select>
@@ -90,23 +106,10 @@
       </form>
       <p id="grant-status" class="grant-status"></p>
     </section>
-  </main>
-
-  <main class="layout" id="tab-airflow" hidden>
-    <section class="panel dags-panel">
-      <h2>Jobs (Dags)</h2>
-      <p class="hint">
-        One permission chip per action Airflow's Auth Manager checks per Dag — <code>view</code>, <code>trigger</code>,
-        <code>view_logs</code>, <code>view_code</code>. Every chip here is the same <code>data.app.allow</code> OPA
-        decision that <code>opa_auth_manager</code> makes natively inside Airflow itself via
-        <code>data.airflow.allow</code> — this tab never talks to Airflow, it previews the policy.
-      </p>
-      <div id="dag-list" class="dag-list"></div>
-    </section>
 
     <section class="panel airflow-policy-panel">
       <h2>Policy inspector — Airflow</h2>
-      <p class="hint">Same authz database as the Data Catalog tab, filtered to <code>airflow.dag.*</code> resources.</p>
+      <p class="hint">Same authz database as above, filtered to <code>airflow.dag.*</code> resources.</p>
       <div class="policy-tables policy-tables-3">
         <div>
           <h3><span class="tok tok-p">p</span> policies — subject, resource, action</h3>

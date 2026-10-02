@@ -14,6 +14,10 @@ import jwt
 from fastapi import HTTPException, Request
 from jwt import PyJWKClient
 
+# Empty string (rather than unset) deliberately skips the issuer check
+# below — see 10-keycloak.yaml for why a k8s deployment with no fixed
+# ingress hostname can't hardcode one expected issuer the way this
+# default (matching docker-compose's fixed "localhost:8180") can.
 KEYCLOAK_ISSUER = os.environ.get("KEYCLOAK_ISSUER", "http://localhost:8180/realms/idma")
 KEYCLOAK_JWKS_URL = os.environ.get(
     "KEYCLOAK_JWKS_URL", "http://keycloak:8080/realms/idma/protocol/openid-connect/certs"
@@ -36,15 +40,13 @@ def get_current_user(request: Request) -> AuthedUser:
         raise HTTPException(status_code=401, detail="missing Authorization: Bearer <token> header")
     token = header.split(" ", 1)[1].strip()
 
+    decode_kwargs = {"algorithms": ["RS256"], "options": {"verify_aud": False}}
+    if KEYCLOAK_ISSUER:
+        decode_kwargs["issuer"] = KEYCLOAK_ISSUER
+
     try:
         signing_key = _jwk_client.get_signing_key_from_jwt(token)
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            issuer=KEYCLOAK_ISSUER,
-            options={"verify_aud": False},
-        )
+        claims = jwt.decode(token, signing_key.key, **decode_kwargs)
     except jwt.PyJWTError as err:
         raise HTTPException(status_code=401, detail=f"invalid token: {err}") from err
 

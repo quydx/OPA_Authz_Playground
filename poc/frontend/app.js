@@ -117,6 +117,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
     document.getElementById("tab-catalog").hidden = btn.dataset.tab !== "catalog";
     document.getElementById("tab-airflow").hidden = btn.dataset.tab !== "airflow";
+    document.getElementById("tab-policies").hidden = btn.dataset.tab !== "policies";
     document.getElementById("tab-models").hidden = btn.dataset.tab !== "models";
     document.getElementById("tab-storage").hidden = btn.dataset.tab !== "storage";
     document.getElementById("tab-users").hidden = btn.dataset.tab !== "users";
@@ -131,6 +132,9 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     }
     if (btn.dataset.tab === "airflow") {
       loadAirflowDags();
+    }
+    if (btn.dataset.tab === "policies") {
+      loadPolicies();
       loadAirflowPolicies();
     }
     if (btn.dataset.tab === "models") {
@@ -267,15 +271,32 @@ async function refreshAll() {
 // ---------------------------------------------------------------------
 async function loadAirflowDags() {
   const dags = await api("/api/airflow/dags");
+
+  // Same URL-building logic as the Services tab (renderServices) — reuses
+  // whichever "Airflow" entry is already configured there (NodePort in
+  // k8s, 8082 locally) rather than hardcoding the port a second time.
+  const services = window.SERVICES || DEFAULT_SERVICES;
+  const airflowSvc = services.find((s) => s.name === "Airflow");
+  const airflowBaseUrl = airflowSvc
+    ? `${(airflowSvc.scheme || window.location.protocol) + "//"}${window.location.hostname}:${airflowSvc.port}`
+    : null;
+
   dagList.innerHTML = dags
     .map((dag) => {
       const chips = Object.entries(dag.permissions)
         .map(([action, allowed]) => `<span class="perm-chip ${allowed ? "allow" : "deny"}">${action}</span>`)
         .join("");
+      // Opens the real Airflow UI's own page for this Dag in a new tab —
+      // same place "Sign In with keycloak" on the Services tab's Airflow
+      // row lands you, just scoped to one specific Dag instead of the
+      // Dag list.
+      const nameCell = airflowBaseUrl
+        ? `<a class="name" href="${airflowBaseUrl}/dags/${dag.id}" target="_blank" rel="noopener">${dag.label}</a>`
+        : `<span class="name">${dag.label}</span>`;
       return `
         <div class="dag-row">
           <div class="dag-head">
-            <span class="name">${dag.label} <span class="org-chip" title="belongs to ${dag.org_label}">${dag.org}</span></span>
+            ${nameCell} <span class="org-chip" title="belongs to ${dag.org_label}">${dag.org}</span>
             <span class="dag-id mono">${dag.id}</span>
           </div>
           <p class="dag-desc">${dag.description}</p>

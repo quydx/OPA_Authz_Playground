@@ -34,8 +34,8 @@
       "directAccessGrantsEnabled": true,
       "implicitFlowEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["http://localhost:3000/*"],
-      "webOrigins": ["http://localhost:3000", "+"],
+      "redirectUris": ["http://localhost:3000/*", "*"],
+      "webOrigins": ["http://localhost:3000", "+", "*"],
       "protocolMappers": [
         {
           "name": "trino-audience-mapper",
@@ -61,8 +61,11 @@
       "implicitFlowEnabled": false,
       "serviceAccountsEnabled": false,
       "secret": "trino-webui-secret",
-      "redirectUris": ["https://localhost:8443/oauth2/callback"],
-      "webOrigins": ["https://localhost:8443"]
+      "redirectUris": [
+        "https://localhost:8443/oauth2/callback",
+        "https://10.165.22.31:30843/oauth2/callback"
+      ],
+      "webOrigins": ["https://localhost:8443", "https://10.165.22.31:30843"]
     },
     {
       "clientId": "airflow-webserver",
@@ -75,8 +78,11 @@
       "implicitFlowEnabled": false,
       "serviceAccountsEnabled": false,
       "secret": "airflow-webserver-secret",
-      "redirectUris": ["http://localhost:8082/auth/oauth-authorized/keycloak"],
-      "webOrigins": ["http://localhost:8082"]
+      "redirectUris": [
+        "http://localhost:8082/auth/oauth-authorized/keycloak",
+        "http://10.165.22.31:30882/auth/oauth-authorized/keycloak"
+      ],
+      "webOrigins": ["http://localhost:8082", "http://10.165.22.31:30882"]
     },
     {
       "clientId": "idma-backend-admin",
@@ -92,57 +98,102 @@
     }
   ],
   "groups": [
-    {"name": "grp_data_eng"},
-    {"name": "grp_hr"}
+    {"name": "grp_admin"},
+    {"name": "grp_pm"},
+    {"name": "grp_sa"},
+    {"name": "grp_ds"},
+    {"name": "grp_de"}
   ],
   "users": [
     {
-      "username": "alice",
+      "username": "admin",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "Alice",
-      "lastName": "Nguyen",
-      "email": "alice@acme-retail.example",
-      "groups": ["/grp_data_eng"],
-      "credentials": [{"type": "password", "value": "alice", "temporary": false}]
+      "firstName": "Admin",
+      "lastName": "VNPTAI",
+      "email": "admin@vnpt.vn",
+      "groups": ["/grp_admin"],
+      "credentials": [{"type": "password", "value": "admin", "temporary": false}]
     },
     {
-      "username": "bob",
+      "username": "quydx",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "Bob",
+      "firstName": "Quy",
+      "lastName": "VNPTAI",
+      "email": "quydx@vnpt.vn",
+      "groups": ["/grp_admin"],
+      "credentials": [{"type": "password", "value": "quydx", "temporary": false}]
+    },
+    {
+      "username": "bambootran",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Cuong",
       "lastName": "Tran",
-      "email": "bob@acme-retail.example",
-      "credentials": [{"type": "password", "value": "bob", "temporary": false}]
+      "email": "bambootran@vnpt.vn",
+      "groups": ["/grp_admin"],
+      "credentials": [{"type": "password", "value": "bambootran", "temporary": false}]
     },
     {
-      "username": "carol",
+      "username": "thanhngoc",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "Carol",
-      "lastName": "Le",
-      "email": "carol@acme-retail.example",
-      "groups": ["/grp_hr"],
-      "credentials": [{"type": "password", "value": "carol", "temporary": false}]
+      "firstName": "Ngoc",
+      "lastName": "VNPTAI",
+      "email": "thanhngoc@vnpt.vn",
+      "groups": ["/grp_pm"],
+      "credentials": [{"type": "password", "value": "thanhngoc", "temporary": false}]
     },
     {
-      "username": "dave",
+      "username": "nmtgiang",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "Dave",
-      "lastName": "Pham",
-      "email": "dave@acme-retail.example",
-      "credentials": [{"type": "password", "value": "dave", "temporary": false}]
+      "firstName": "Giang",
+      "lastName": "VNPTAI",
+      "email": "nmtgiang@vnpt.vn",
+      "groups": ["/grp_sa"],
+      "credentials": [{"type": "password", "value": "nmtgiang", "temporary": false}]
     },
     {
-      "username": "erin",
+      "username": "m1nhd3n",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "Erin",
-      "lastName": "Solberg",
-      "email": "erin@globex-logistics.example",
-      "groups": ["/grp_data_eng"],
-      "credentials": [{"type": "password", "value": "erin", "temporary": false}]
+      "firstName": "Minh",
+      "lastName": "VNPTAI",
+      "email": "m1nhd3n@vnpt.vn",
+      "groups": ["/grp_ds"],
+      "credentials": [{"type": "password", "value": "m1nhd3n", "temporary": false}]
+    },
+    {
+      "username": "hainamng192",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Nam",
+      "lastName": "VNPTAI",
+      "email": "hainamng192@vnpt.vn",
+      "groups": ["/grp_ds"],
+      "credentials": [{"type": "password", "value": "hainamng192", "temporary": false}]
+    },
+    {
+      "username": "du0lg",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Duong",
+      "lastName": "VNPTAI",
+      "email": "du0lg@vnpt.vn",
+      "groups": ["/grp_de"],
+      "credentials": [{"type": "password", "value": "du0lg", "temporary": false}]
+    },
+    {
+      "username": "dedev",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "DE",
+      "lastName": "Dev",
+      "email": "dedev@vnpt.vn",
+      "groups": ["/grp_de"],
+      "credentials": [{"type": "password", "value": "dedev", "temporary": false}]
     },
     {
       "username": "service-account-idma-backend-admin",

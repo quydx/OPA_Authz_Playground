@@ -1,0 +1,220 @@
+# Mirrors poc/keycloak/realm-idma.json exactly (keep both in sync by
+# hand — same "config lives in the manifest, not the image" split as
+# every other service's configmaps in this directory). --import-realm
+# (see 10-keycloak.yaml) re-imports this fresh on every Keycloak start,
+# same idempotent-by-design spirit as minio/init.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idma-keycloak-realm
+  namespace: bigdata-dev
+  labels: {app.kubernetes.io/part-of: idma-poc}
+data:
+  realm-idma.json: |
+    {
+      "realm": "idma",
+      "enabled": true,
+      "sslRequired": "none",
+      "registrationAllowed": false,
+      "loginTheme": "keycloak",
+      "accessTokenLifespan": 1800,
+      "identityProviders": [
+        {
+          "alias": "vnpt-cas",
+          "displayName": "VNPT",
+          "providerId": "cas",
+          "enabled": true,
+          "trustEmail": false,
+          "storeToken": false,
+          "addReadTokenRoleOnCreate": false,
+          "firstBrokerLoginFlowAlias": "first broker login",
+          "config": {
+            "casServerUrlPrefix": "https://id.vnpt.com.vn/cas",
+            "gateway": "false",
+            "renew": "false",
+            "redirectToCasServerAfterLogout": "true"
+          }
+        }
+      ],
+      "clients": [
+        {
+          "clientId": "idma-frontend",
+          "name": "IDMA POC frontend",
+          "enabled": true,
+          "publicClient": true,
+          "protocol": "openid-connect",
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": true,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "redirectUris": ["http://localhost:3000/*", "*"],
+          "webOrigins": ["http://localhost:3000", "+", "*"],
+          "protocolMappers": [
+            {
+              "name": "trino-audience-mapper",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "consentRequired": false,
+              "config": {
+                "included.custom.audience": "trino",
+                "id.token.claim": "false",
+                "access.token.claim": "true"
+              }
+            }
+          ]
+        },
+        {
+          "clientId": "trino-webui",
+          "name": "Trino Web UI (browser OAuth2 login)",
+          "enabled": true,
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "secret": "trino-webui-secret",
+          "redirectUris": [
+            "https://localhost:8443/oauth2/callback",
+            "https://10.165.22.31:30843/oauth2/callback"
+          ],
+          "webOrigins": ["https://localhost:8443", "https://10.165.22.31:30843"]
+        },
+        {
+          "clientId": "airflow-webserver",
+          "name": "Airflow (FabAuthManager OAuth login)",
+          "enabled": true,
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "secret": "airflow-webserver-secret",
+          "redirectUris": [
+            "http://localhost:8082/auth/oauth-authorized/keycloak",
+            "http://10.165.22.31:30882/auth/oauth-authorized/keycloak"
+          ],
+          "webOrigins": ["http://localhost:8082", "http://10.165.22.31:30882"]
+        },
+        {
+          "clientId": "idma-backend-admin",
+          "name": "Backend's own Keycloak admin service account (Users CRUD)",
+          "enabled": true,
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "standardFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": true,
+          "secret": "idma-backend-admin-secret"
+        }
+      ],
+      "groups": [
+        {"name": "grp_admin"},
+        {"name": "grp_pm"},
+        {"name": "grp_sa"},
+        {"name": "grp_ds"},
+        {"name": "grp_de"}
+      ],
+      "users": [
+        {
+          "username": "admin",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Admin",
+          "lastName": "VNPTAI",
+          "email": "admin@vnpt.vn",
+          "groups": ["/grp_admin"],
+          "credentials": [{"type": "password", "value": "admin", "temporary": false}]
+        },
+        {
+          "username": "quydx",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Quy",
+          "lastName": "VNPTAI",
+          "email": "quydx@vnpt.vn",
+          "groups": ["/grp_admin"],
+          "credentials": [{"type": "password", "value": "quydx", "temporary": false}]
+        },
+        {
+          "username": "bambootran",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Cuong",
+          "lastName": "Tran",
+          "email": "bambootran@vnpt.vn",
+          "groups": ["/grp_admin"],
+          "credentials": [{"type": "password", "value": "bambootran", "temporary": false}]
+        },
+        {
+          "username": "thanhngoc",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Ngoc",
+          "lastName": "VNPTAI",
+          "email": "thanhngoc@vnpt.vn",
+          "groups": ["/grp_pm"],
+          "credentials": [{"type": "password", "value": "thanhngoc", "temporary": false}]
+        },
+        {
+          "username": "nmtgiang",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Giang",
+          "lastName": "VNPTAI",
+          "email": "nmtgiang@vnpt.vn",
+          "groups": ["/grp_sa"],
+          "credentials": [{"type": "password", "value": "nmtgiang", "temporary": false}]
+        },
+        {
+          "username": "m1nhd3n",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Minh",
+          "lastName": "VNPTAI",
+          "email": "m1nhd3n@vnpt.vn",
+          "groups": ["/grp_ds"],
+          "credentials": [{"type": "password", "value": "m1nhd3n", "temporary": false}]
+        },
+        {
+          "username": "hainamng192",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Nam",
+          "lastName": "VNPTAI",
+          "email": "hainamng192@vnpt.vn",
+          "groups": ["/grp_ds"],
+          "credentials": [{"type": "password", "value": "hainamng192", "temporary": false}]
+        },
+        {
+          "username": "du0lg",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "Duong",
+          "lastName": "VNPTAI",
+          "email": "du0lg@vnpt.vn",
+          "groups": ["/grp_de"],
+          "credentials": [{"type": "password", "value": "du0lg", "temporary": false}]
+        },
+        {
+          "username": "dedev",
+          "enabled": true,
+          "emailVerified": true,
+          "firstName": "DE",
+          "lastName": "Dev",
+          "email": "dedev@vnpt.vn",
+          "groups": ["/grp_de"],
+          "credentials": [{"type": "password", "value": "dedev", "temporary": false}]
+        },
+        {
+          "username": "service-account-idma-backend-admin",
+          "enabled": true,
+          "serviceAccountClientId": "idma-backend-admin",
+          "clientRoles": {
+            "realm-management": ["manage-users", "view-users"]
+          }
+        }
+      ]
+    }

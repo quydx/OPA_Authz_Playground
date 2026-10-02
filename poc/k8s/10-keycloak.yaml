@@ -1,0 +1,90 @@
+# Authentication service — issues the JWTs the backend (auth.py) and
+# Trino (config.properties) both validate. See IDMA Authen & Authz.MD.
+#
+# No KC_HOSTNAME here, unlike docker-compose (which fixes it to
+# "localhost:8180" because every component — browser, Trino, backend —
+# can all reach exactly that one address). NodePort exposes this on
+# every node's IP, and there's no single stable entrypoint for this
+# cluster, so KC_HOSTNAME is left unset: Keycloak's hostname v2 provider
+# then derives issuer/endpoint URLs from each request's own Host header,
+# which is correct for whichever node a browser happens to land on.
+# KC_HOSTNAME_STRICT=false stops it rejecting those varying Host headers.
+#
+# Consequence: the issuer Keycloak stamps into a token varies by entry
+# node, so neither the backend nor Trino can hardcode one expected
+# issuer string to check against (see KEYCLOAK_ISSUER in 06-backend.yaml
+# and config.properties in 00-configmap-trino-server-config.yaml) —
+# signature + audience are still fully verified, only the issuer-string
+# match is dropped. A fixed Ingress/LoadBalancer hostname would remove
+# this limitation entirely if one becomes available.
+#
+# image: must be built from poc/keycloak/Dockerfile and pushed to
+# ai-repository.vnpt.vn/idma/idma-poc-keycloak:latest before this
+# Deployment will actually pull successfully — same caveat as
+# 08-airflow.yaml's and 09-mlflow.yaml's images.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-keycloak
+  namespace: bigdata-dev
+  labels: {app: idma-keycloak, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: idma-keycloak}
+  template:
+    metadata:
+      labels: {app: idma-keycloak}
+    spec:
+      imagePullSecrets:
+        - name: ai-registry
+      containers:
+        - name: keycloak
+          image: ai-repository.vnpt.vn/idma/idma-poc-keycloak:latest
+          # args, not command: the base image's ENTRYPOINT is its own kc.sh
+          # launcher — docker-compose's `command:` only replaces CMD and
+          # leaves that entrypoint in place, but k8s `command:` replaces
+          # the entrypoint itself. args: is the k8s equivalent of
+          # docker-compose's `command:` here.
+          args: ["start-dev", "--import-realm"]
+          envFrom:
+            - secretRef: {name: idma-keycloak-secret}
+          env:
+            - {name: KC_HOSTNAME_STRICT, value: "false"}
+            - {name: KC_HOSTNAME_STRICT_HTTPS, value: "false"}
+            - {name: KC_HTTP_ENABLED, value: "true"}
+          volumeMounts:
+            - name: realm-import
+              mountPath: /opt/keycloak/data/import/realm-idma.json
+              subPath: realm-idma.json
+              readOnly: true
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /realms/idma, port: 8080}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 18
+          resources:
+            # Measured against the same workload locally — Keycloak's
+            # JVM baseline plus start-dev's auto-build step (for the CAS
+            # provider jar) needs real headroom on first start.
+            requests: {cpu: "300m", memory: "768Mi"}
+            limits: {cpu: "1000m", memory: "1536Mi"}
+      volumes:
+        - name: realm-import
+          configMap: {name: idma-keycloak-realm}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-keycloak
+  namespace: bigdata-dev
+  labels: {app: idma-keycloak, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: NodePort
+  selector: {app: idma-keycloak}
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30180

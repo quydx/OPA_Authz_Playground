@@ -1,16 +1,20 @@
-"""Demo identities, the resource tree, and the initial policy set.
+"""Real team identities, the resource tree, and the initial policy set.
 
-This mirrors the worked examples from the IDMA authorization model at a
-small scale: a direct grant, a group-inherited grant, resource-tree
-inheritance, and a user with no policy at all (default deny).
+Was five fictional demo identities (alice/bob/carol/dave/erin); replaced
+with the actual iHub team (see "iHub users.xlsx") and five role-based
+groups matching its Group column. Same worked-example shape as before —
+group-inherited grants, resource-tree inheritance, and a deliberate
+separation-of-duties case (grp_de can operate hr_payroll_sync without a
+`select` grant on the `hr` schema itself, i.e. maintain the pipeline
+without being able to query salary data through it) — just populated
+with this team's own people instead of a textbook scenario.
 
 These are plain data structures — the authz database (see db.py) is the
 actual system of record once the backend starts; this module only supplies
-the initial seed for the five demo identities below. Users created live
-through the Users tab (see main.py's /api/users CRUD and
-keycloak_admin.py) live only in the authz database and Keycloak — never
-here, since this file ships with the image and isn't something a running
-container can write back to.
+the initial seed. Users created live through the Users tab (see main.py's
+/api/users CRUD and keycloak_admin.py) live only in the authz database and
+Keycloak — never here, since this file ships with the image and isn't
+something a running container can write back to.
 """
 
 # Two organizations — separate tenants, not just separate resources. Every
@@ -18,22 +22,34 @@ container can write back to.
 # these in RESOURCE_ORG, and authz.rego's same_org() check enforces the
 # boundary independently of whatever subject/resource grant might
 # otherwise match — see the org isolation walkthrough in README.md.
+#
+# org-001 relabeled from "Acme Retail" to "VNPTAI" (the actual team's own
+# company) when the user base below switched from the fictional demo
+# identities to the real one — the id stays "org-001" so RESOURCE_ORG,
+# the MinIO credentials in ORG_STORAGE, and the Trino catalog below don't
+# need to change along with it. org-002 ("Globex Logistics") is left as
+# unused second-tenant demo content — nobody on the real team belongs to
+# it, so same_org() still denies it to everyone below, same guarantee as
+# before.
 ORGANIZATIONS = {
-    "org-001": "Acme Retail",
+    "org-001": "VNPTAI",
     "org-002": "Globex Logistics",
 }
 
+# Region is "APAC" for everyone (not the xlsx's literal "Vietnam") so the
+# row-filter policy on sales.orders (filters to the caller's own region)
+# still matches real seeded rows — Vietnam is geographically APAC, and
+# none of CATALOG's seed data uses a "Vietnam" region string.
 DEMO_USERS = {
-    "alice": {"label": "Alice Nguyen", "title": "Data Engineer", "groups": ["grp_data_eng"], "region": "APAC", "hr": False, "org": "org-001"},
-    "bob": {"label": "Bob Tran", "title": "Analyst", "groups": [], "region": "EMEA", "hr": False, "org": "org-001"},
-    "carol": {"label": "Carol Le", "title": "HR Admin", "groups": ["grp_hr"], "region": "APAC", "hr": True, "org": "org-001"},
-    "dave": {"label": "Dave Pham", "title": "Guest", "groups": [], "region": "LATAM", "hr": False, "org": "org-001"},
-    # erin is deliberately in the SAME group as alice (grp_data_eng) despite
-    # being in a different organization — a realistic naming collision
-    # ("data engineer" is a common role title across companies) that
-    # demonstrates the org boundary holds even when a group grant would
-    # otherwise reach across tenants.
-    "erin": {"label": "Erin Solberg", "title": "Data Engineer", "groups": ["grp_data_eng"], "region": "EMEA", "hr": False, "org": "org-002"},
+    "admin": {"label": "Admin", "title": "Admin", "groups": ["grp_admin"], "region": "APAC", "hr": False, "org": "org-001"},
+    "quydx": {"label": "Quy", "title": "SA", "groups": ["grp_admin"], "region": "APAC", "hr": False, "org": "org-001"},
+    "bambootran": {"label": "Cuong Tran", "title": "Boss", "groups": ["grp_admin"], "region": "APAC", "hr": False, "org": "org-001"},
+    "thanhngoc": {"label": "Ngoc", "title": "PM", "groups": ["grp_pm"], "region": "APAC", "hr": False, "org": "org-001"},
+    "nmtgiang": {"label": "Giang", "title": "SA", "groups": ["grp_sa"], "region": "APAC", "hr": False, "org": "org-001"},
+    "m1nhd3n": {"label": "Minh", "title": "DS", "groups": ["grp_ds"], "region": "APAC", "hr": False, "org": "org-001"},
+    "hainamng192": {"label": "Nam", "title": "DS", "groups": ["grp_ds"], "region": "APAC", "hr": False, "org": "org-001"},
+    "du0lg": {"label": "Duong", "title": "DE", "groups": ["grp_de"], "region": "APAC", "hr": False, "org": "org-001"},
+    "dedev": {"label": "DE Dev", "title": "DE", "groups": ["grp_de"], "region": "APAC", "hr": False, "org": "org-001"},
 }
 
 # schema -> tables. Also doubles as the tree the frontend renders.
@@ -45,11 +61,20 @@ CATALOG = {
     "org2_sales": ["customers", "orders"],
 }
 
-# g: user -> group
+# g: user -> group. Kept as its own list (rather than derived from
+# DEMO_USERS's "groups" field above, which nothing reads) to match this
+# file's existing convention — see INITIAL_POLICIES below for what each
+# group actually grants.
 GROUP_MEMBERSHIP = [
-    ("alice", "grp_data_eng"),
-    ("carol", "grp_hr"),
-    ("erin", "grp_data_eng"),
+    ("admin", "grp_admin"),
+    ("quydx", "grp_admin"),
+    ("bambootran", "grp_admin"),
+    ("thanhngoc", "grp_pm"),
+    ("nmtgiang", "grp_sa"),
+    ("m1nhd3n", "grp_ds"),
+    ("hainamng192", "grp_ds"),
+    ("du0lg", "grp_de"),
+    ("dedev", "grp_de"),
 ]
 
 # Which organization each schema/Dag (resource-tree root) belongs to.
@@ -66,6 +91,8 @@ RESOURCE_ORG = {
     "airflow.dag.customer_export": "org-001",
     "airflow.dag.org2_etl": "org-002",
     "airflow.dag.train_sample_model": "org-001",
+    "airflow.dag.train_eval_pipeline": "org-001",
+    "airflow.dag.automl_wizard_pipeline": "org-001",
 }
 
 # Storage isolation — the one guarantee in this POC that OPA never
@@ -95,9 +122,7 @@ RESOURCE_TREE = [
 ]
 
 # Airflow demo Dags — same isolation story as the Trino catalog, one
-# layer up: grp_data_eng runs sales_etl, grp_hr runs the sensitive
-# hr_payroll_sync, bob gets a direct per-Dag grant on customer_export
-# (same shape as his direct sales.customers grant), dave gets nothing.
+# layer up. See INITIAL_POLICIES below for which group operates which Dag.
 AIRFLOW_DAGS = {
     "sales_etl": {
         "label": "Sales ETL",
@@ -119,6 +144,14 @@ AIRFLOW_DAGS = {
         "label": "Train Sample Model",
         "description": "Trains a sample iris classifier and registers it in MLflow",
     },
+    "train_eval_pipeline": {
+        "label": "Train/Eval Pipeline",
+        "description": "Configurable end-to-end ML pipeline: extract, split, train, evaluate, quality-gated register, optional promote",
+    },
+    "automl_wizard_pipeline": {
+        "label": "AutoML Wizard Pipeline",
+        "description": "8-step AutoML wizard: choose problem, connect data, select data, clean, select target, create features, configure & run, results",
+    },
 }
 
 # The action vocabulary opa_auth_manager maps Airflow's (method,
@@ -126,39 +159,137 @@ AIRFLOW_DAGS = {
 AIRFLOW_ACTIONS = ["view", "trigger", "view_logs", "view_code"]
 
 # p: subject (user or group), resource, action
+#
+# Role design (five groups, matching "iHub users.xlsx"'s Group column):
+#   grp_admin (Admin/Boss/senior SA) — full access to every org-001
+#     schema and Dag, including hr_payroll_sync and hr itself.
+#   grp_pm (Project Manager) — read-only visibility: sales data, plus
+#     view/view_logs (not trigger/view_code) on the non-HR Dags. Tracks
+#     delivery status without operating pipelines or seeing payroll.
+#   grp_sa (Solution Architect) — same operational reach as admin on the
+#     non-HR Dags (view/trigger/view_logs/view_code + sales select), but
+#     no hr/hr_payroll_sync — architects design the non-sensitive
+#     pipelines, payroll stays admin-only.
+#   grp_ds (Data Scientist) — owns train_sample_model outright; read-only
+#     visibility into the ETL Dags that feed its training data; sales
+#     select for building datasets. No hr access.
+#   grp_de (Data Engineer) — owns sales_etl/customer_export outright, AND
+#     can operate hr_payroll_sync (view/trigger/view_logs/view_code) —
+#     deliberately WITHOUT a `select` grant on the `hr` schema itself.
+#     Separation of duties: maintaining the pipeline doesn't require
+#     being able to query the salary data it moves. Read-only visibility
+#     into train_sample_model, reciprocal to grp_ds's ETL visibility.
+#
+# org-002 (Globex Logistics) gets no grants here — nobody on the real
+# team belongs to it, and same_org() would deny it regardless (see
+# RESOURCE_ORG above); its Dag/schema content is unused demo filler.
 INITIAL_POLICIES = [
-    ("grp_data_eng", "sales", "select"),   # group grant, inherited by every table in sales
-    ("bob", "sales.customers", "select"),  # direct grant, table only
-    ("grp_hr", "hr", "select"),            # group grant, inherited by every table in hr
-    # dave gets nothing — demonstrates default deny until granted live in the UI
+    ("grp_admin", "sales", "select"),
+    ("grp_admin", "hr", "select"),
+    ("grp_pm", "sales", "select"),
+    ("grp_sa", "sales", "select"),
+    ("grp_ds", "sales", "select"),
+    ("grp_de", "sales", "select"),
 
-    ("grp_data_eng", "airflow.dag.sales_etl", "view"),
-    ("grp_data_eng", "airflow.dag.sales_etl", "trigger"),
-    ("grp_data_eng", "airflow.dag.sales_etl", "view_logs"),
-    ("grp_data_eng", "airflow.dag.sales_etl", "view_code"),
+    ("grp_admin", "airflow.dag.sales_etl", "view"),
+    ("grp_admin", "airflow.dag.sales_etl", "trigger"),
+    ("grp_admin", "airflow.dag.sales_etl", "view_logs"),
+    ("grp_admin", "airflow.dag.sales_etl", "view_code"),
+    ("grp_sa", "airflow.dag.sales_etl", "view"),
+    ("grp_sa", "airflow.dag.sales_etl", "trigger"),
+    ("grp_sa", "airflow.dag.sales_etl", "view_logs"),
+    ("grp_sa", "airflow.dag.sales_etl", "view_code"),
+    ("grp_de", "airflow.dag.sales_etl", "view"),
+    ("grp_de", "airflow.dag.sales_etl", "trigger"),
+    ("grp_de", "airflow.dag.sales_etl", "view_logs"),
+    ("grp_de", "airflow.dag.sales_etl", "view_code"),
+    ("grp_pm", "airflow.dag.sales_etl", "view"),
+    ("grp_pm", "airflow.dag.sales_etl", "view_logs"),
+    ("grp_ds", "airflow.dag.sales_etl", "view"),
+    ("grp_ds", "airflow.dag.sales_etl", "view_logs"),
 
-    ("grp_hr", "airflow.dag.hr_payroll_sync", "view"),
-    ("grp_hr", "airflow.dag.hr_payroll_sync", "trigger"),
-    ("grp_hr", "airflow.dag.hr_payroll_sync", "view_logs"),
+    ("grp_admin", "airflow.dag.customer_export", "view"),
+    ("grp_admin", "airflow.dag.customer_export", "trigger"),
+    ("grp_admin", "airflow.dag.customer_export", "view_logs"),
+    ("grp_admin", "airflow.dag.customer_export", "view_code"),
+    ("grp_sa", "airflow.dag.customer_export", "view"),
+    ("grp_sa", "airflow.dag.customer_export", "trigger"),
+    ("grp_sa", "airflow.dag.customer_export", "view_logs"),
+    ("grp_sa", "airflow.dag.customer_export", "view_code"),
+    ("grp_de", "airflow.dag.customer_export", "view"),
+    ("grp_de", "airflow.dag.customer_export", "trigger"),
+    ("grp_de", "airflow.dag.customer_export", "view_logs"),
+    ("grp_de", "airflow.dag.customer_export", "view_code"),
+    ("grp_pm", "airflow.dag.customer_export", "view"),
+    ("grp_pm", "airflow.dag.customer_export", "view_logs"),
+    ("grp_ds", "airflow.dag.customer_export", "view"),
+    ("grp_ds", "airflow.dag.customer_export", "view_logs"),
 
-    ("bob", "airflow.dag.customer_export", "view"),  # direct grant, view only
-    # dave gets nothing here either — same default deny, one layer up
+    # hr_payroll_sync: admin (full) and grp_de (operates the pipeline,
+    # no hr schema select — see the role-design note above). Nobody else.
+    ("grp_admin", "airflow.dag.hr_payroll_sync", "view"),
+    ("grp_admin", "airflow.dag.hr_payroll_sync", "trigger"),
+    ("grp_admin", "airflow.dag.hr_payroll_sync", "view_logs"),
+    ("grp_admin", "airflow.dag.hr_payroll_sync", "view_code"),
+    ("grp_de", "airflow.dag.hr_payroll_sync", "view"),
+    ("grp_de", "airflow.dag.hr_payroll_sync", "trigger"),
+    ("grp_de", "airflow.dag.hr_payroll_sync", "view_logs"),
+    ("grp_de", "airflow.dag.hr_payroll_sync", "view_code"),
 
-    ("grp_data_eng", "airflow.dag.train_sample_model", "view"),
-    ("grp_data_eng", "airflow.dag.train_sample_model", "trigger"),
-    ("grp_data_eng", "airflow.dag.train_sample_model", "view_logs"),
-    ("grp_data_eng", "airflow.dag.train_sample_model", "view_code"),
+    ("grp_admin", "airflow.dag.train_sample_model", "view"),
+    ("grp_admin", "airflow.dag.train_sample_model", "trigger"),
+    ("grp_admin", "airflow.dag.train_sample_model", "view_logs"),
+    ("grp_admin", "airflow.dag.train_sample_model", "view_code"),
+    ("grp_ds", "airflow.dag.train_sample_model", "view"),
+    ("grp_ds", "airflow.dag.train_sample_model", "trigger"),
+    ("grp_ds", "airflow.dag.train_sample_model", "view_logs"),
+    ("grp_ds", "airflow.dag.train_sample_model", "view_code"),
+    ("grp_sa", "airflow.dag.train_sample_model", "view"),
+    ("grp_sa", "airflow.dag.train_sample_model", "trigger"),
+    ("grp_sa", "airflow.dag.train_sample_model", "view_logs"),
+    ("grp_sa", "airflow.dag.train_sample_model", "view_code"),
+    ("grp_pm", "airflow.dag.train_sample_model", "view"),
+    ("grp_pm", "airflow.dag.train_sample_model", "view_logs"),
+    ("grp_de", "airflow.dag.train_sample_model", "view"),
+    ("grp_de", "airflow.dag.train_sample_model", "view_logs"),
 
-    # org-002's own grants — same group name (grp_data_eng) as org-001's,
-    # same resource shape (a "sales" schema + its own ETL Dag), fully
-    # separate tenant. Without the org check in authz.rego, this would
-    # also hand alice (also grp_data_eng, but org-001) access to org-002's
-    # data — that's exactly what same_org() exists to prevent.
-    ("grp_data_eng", "org2_sales", "select"),
-    ("grp_data_eng", "airflow.dag.org2_etl", "view"),
-    ("grp_data_eng", "airflow.dag.org2_etl", "trigger"),
-    ("grp_data_eng", "airflow.dag.org2_etl", "view_logs"),
-    ("grp_data_eng", "airflow.dag.org2_etl", "view_code"),
+    # Same shape as train_sample_model just above — grp_ds owns it, same
+    # visibility-only reach for everyone else that already applies there.
+    ("grp_admin", "airflow.dag.train_eval_pipeline", "view"),
+    ("grp_admin", "airflow.dag.train_eval_pipeline", "trigger"),
+    ("grp_admin", "airflow.dag.train_eval_pipeline", "view_logs"),
+    ("grp_admin", "airflow.dag.train_eval_pipeline", "view_code"),
+    ("grp_ds", "airflow.dag.train_eval_pipeline", "view"),
+    ("grp_ds", "airflow.dag.train_eval_pipeline", "trigger"),
+    ("grp_ds", "airflow.dag.train_eval_pipeline", "view_logs"),
+    ("grp_ds", "airflow.dag.train_eval_pipeline", "view_code"),
+    ("grp_sa", "airflow.dag.train_eval_pipeline", "view"),
+    ("grp_sa", "airflow.dag.train_eval_pipeline", "trigger"),
+    ("grp_sa", "airflow.dag.train_eval_pipeline", "view_logs"),
+    ("grp_sa", "airflow.dag.train_eval_pipeline", "view_code"),
+    ("grp_pm", "airflow.dag.train_eval_pipeline", "view"),
+    ("grp_pm", "airflow.dag.train_eval_pipeline", "view_logs"),
+    ("grp_de", "airflow.dag.train_eval_pipeline", "view"),
+    ("grp_de", "airflow.dag.train_eval_pipeline", "view_logs"),
+
+    # Same shape again — grp_ds owns it, same visibility-only reach for
+    # everyone else.
+    ("grp_admin", "airflow.dag.automl_wizard_pipeline", "view"),
+    ("grp_admin", "airflow.dag.automl_wizard_pipeline", "trigger"),
+    ("grp_admin", "airflow.dag.automl_wizard_pipeline", "view_logs"),
+    ("grp_admin", "airflow.dag.automl_wizard_pipeline", "view_code"),
+    ("grp_ds", "airflow.dag.automl_wizard_pipeline", "view"),
+    ("grp_ds", "airflow.dag.automl_wizard_pipeline", "trigger"),
+    ("grp_ds", "airflow.dag.automl_wizard_pipeline", "view_logs"),
+    ("grp_ds", "airflow.dag.automl_wizard_pipeline", "view_code"),
+    ("grp_sa", "airflow.dag.automl_wizard_pipeline", "view"),
+    ("grp_sa", "airflow.dag.automl_wizard_pipeline", "trigger"),
+    ("grp_sa", "airflow.dag.automl_wizard_pipeline", "view_logs"),
+    ("grp_sa", "airflow.dag.automl_wizard_pipeline", "view_code"),
+    ("grp_pm", "airflow.dag.automl_wizard_pipeline", "view"),
+    ("grp_pm", "airflow.dag.automl_wizard_pipeline", "view_logs"),
+    ("grp_de", "airflow.dag.automl_wizard_pipeline", "view"),
+    ("grp_de", "airflow.dag.automl_wizard_pipeline", "view_logs"),
 ]
 
 

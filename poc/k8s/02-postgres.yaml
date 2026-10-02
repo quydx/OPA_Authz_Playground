@@ -40,6 +40,19 @@ spec:
             requests: {cpu: "100m", memory: "256Mi"}
             limits: {cpu: "500m", memory: "512Mi"}
       volumes:
+        # KNOWN LIMITATION, not yet fixed: emptyDir wipes authz/demo/
+        # airflow/mlflow on every pod restart (node drain, OOM, redeploy)
+        # — the init ConfigMap only runs `CREATE DATABASE`, not schema
+        # migrations, so a wipe silently breaks every DB-backed workload
+        # (Airflow scheduler, MLflow) until someone manually reruns their
+        # one-shot init Jobs. A PVC on the nfs-retain StorageClass was
+        # tried and reverted: non-root container processes get
+        # "Permission denied" against that export even at mode 777 (only
+        # literal root succeeds), which matches an SELinux container_t vs
+        # nfs_t denial — a node-level config issue outside what's fixable
+        # from this manifest. Needs a cluster/infra admin to check
+        # worker-node AVC denials (journalctl/ausearch) before retrying
+        # persistent storage here.
         - name: data
           emptyDir: {}
         - name: init-scripts
