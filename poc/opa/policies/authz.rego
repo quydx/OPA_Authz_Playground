@@ -75,9 +75,16 @@ same_org(user, resource) if {
 # layered on as its own independent guarantee, the same way Trino's row
 # filters and column masks apply independently of the table grant.
 allow(user, resource, action) if {
+	has_grant(user, resource, action)
+	same_org(user, resource)
+}
+
+# has_grant: the grant half of allow() on its own, without the org check —
+# split out so app.rego can tell "no grant at all" apart from "granted, but
+# blocked by the organization boundary" when explaining a deny.
+has_grant(user, resource, action) if {
 	some p in policies
 	subject_matches(user, p[0])
 	resource_matches(resource, p[1])
 	action == p[2]
-	same_org(user, resource)
 }

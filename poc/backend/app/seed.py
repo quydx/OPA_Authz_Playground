@@ -36,7 +36,7 @@ DEMO_USERS = {
 # org2_sales is org-002's own schema — same shape as sales, fully separate
 # tenant, used to demonstrate organization isolation (see RESOURCE_ORG).
 CATALOG = {
-    "sales": ["customers", "orders", "products"],
+    "sales": ["customers", "orders", "products", "daily_revenue", "revenue_anomalies"],
     "hr": ["employees", "salaries"],
     "org2_sales": ["customers", "orders"],
 }
@@ -61,6 +61,7 @@ RESOURCE_ORG = {
     "airflow.dag.hr_payroll_sync": "org-001",
     "airflow.dag.customer_export": "org-001",
     "airflow.dag.org2_etl": "org-002",
+    "airflow.dag.sales_anomaly_detect": "org-001",
 }
 
 # Storage isolation — the one guarantee in this POC that OPA never
@@ -110,6 +111,10 @@ AIRFLOW_DAGS = {
         "label": "Org2 ETL",
         "description": "Nightly load of org2_sales.orders from the source system",
     },
+    "sales_anomaly_detect": {
+        "label": "Sales Anomaly Detect",
+        "description": "Detects anomalies in sales.daily_revenue with the anomaly service",
+    },
 }
 
 # The action vocabulary opa_auth_manager maps Airflow's (method,
@@ -127,6 +132,11 @@ INITIAL_POLICIES = [
     ("grp_data_eng", "airflow.dag.sales_etl", "trigger"),
     ("grp_data_eng", "airflow.dag.sales_etl", "view_logs"),
     ("grp_data_eng", "airflow.dag.sales_etl", "view_code"),
+
+    ("grp_data_eng", "airflow.dag.sales_anomaly_detect", "view"),
+    ("grp_data_eng", "airflow.dag.sales_anomaly_detect", "trigger"),
+    ("grp_data_eng", "airflow.dag.sales_anomaly_detect", "view_logs"),
+    ("grp_data_eng", "airflow.dag.sales_anomaly_detect", "view_code"),
 
     ("grp_hr", "airflow.dag.hr_payroll_sync", "view"),
     ("grp_hr", "airflow.dag.hr_payroll_sync", "trigger"),

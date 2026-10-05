@@ -15,13 +15,26 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-apiserver:8080/execution/"
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    # Shared JWT key: the scheduler signs task tokens, the apiserver's
+    # Execution API verifies them. Unset, each container generates its own
+    # random key and every task fails "Signature verification failed".
+    AIRFLOW__API_AUTH__JWT_SECRET: "poc-lab-jwt-secret-not-for-production"
     # opa_auth_manager still delegates non-Dag resources (connections,
     # variables, pools, config) to SimpleAuthManager's role check — every
     # demo user needs a role for those, even though Dag access itself is
     # fully decided by OPA regardless of role.
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "alice:USER,bob:USER,carol:USER,dave:VIEWER,erin:USER"
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "false"
+    # Fixed lab passwords (docker-compose only). SimpleAuthManager otherwise
+    # mints random ones and prints them only once, on first generation —
+    # restarts reuse the stored file silently, so users had no way to find
+    # theirs. airflow-apiserver seeds its password file from this value, and
+    # the backend serves the same value to the frontend's Environment page.
+    AIRFLOW_DEMO_PASSWORDS: &airflow-demo-passwords '{"alice":"alicepass","bob":"bobpass","carol":"carolpass","dave":"davepass","erin":"erinpass"}'
     OPA_URL: http://opa:8181
+    # Used by airflow/dags/sales_anomaly_detect.py (task code runs in the scheduler).
+    DEMO_DB_URL: postgresql://poc:pocpass@postgres:5432/demo
+    ANOMALY_SERVICE_URL: http://anomaly:8000
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins
@@ -73,7 +86,7 @@ services:
         condition: service_started
 
   minio:
-    image: minio/minio:latest
+    image: pgsty/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: pocadmin
@@ -95,7 +108,7 @@ services:
   # this against an already-provisioned MinIO is safe — every step in
   # minio/init.sh either uses --ignore-existing or is idempotent by design.
   minio-init:
-    image: minio/mc:latest
+    image: pgsty/minio:latest
     entrypoint: sh
     command: ["/init.sh"]
     environment:
@@ -118,6 +131,7 @@ services:
       TRINO_PORT: "8080"
       TRINO_CATALOG: postgres
       MINIO_ENDPOINT: http://minio:9000
+      AIRFLOW_DEMO_PASSWORDS: *airflow-demo-passwords
     ports:
       - "8001:8000"
     depends_on:
@@ -137,6 +151,20 @@ services:
     depends_on:
       - backend
 
+  # Time-series anomaly detection (train + infer in one request), delivered
+  # as a prebuilt image — not on any registry. Load it once before `up`:
+  #   tar -C ../anomaly_detection_docker_and_doc/anomaly-service_0.1.0-cpu -cf - . | docker load
+  # API contract: ../anomaly_detection_docker_and_doc/anomaly-service_0.1.0_openapi.json
+  # Stateless (persistence off). Reachable in-network at http://anomaly:8000.
+  anomaly:
+    image: anomaly-service:0.1.0-cpu
+    pull_policy: never
+    environment:
+      TRAIN_MAX_CONCURRENCY: "2"
+      PIPELINE_TIMEOUT_SECONDS: "60"
+    ports:
+      - "8002:8000"
+
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
@@ -145,7 +173,10 @@ services:
 
   airflow-apiserver:
     <<: *airflow-common
-    command: api-server
+    # Seed SimpleAuthManager's password file before start: every user is
+    # already present, so it generates nothing and uses these passwords.
+    entrypoint: /bin/bash
+    command: ["-c", "printf '%s\\n' \"$$AIRFLOW_DEMO_PASSWORDS\" > /opt/airflow/simple_auth_manager_passwords.json.generated && exec airflow api-server"]
     ports:
       - "8082:8080"
     depends_on:

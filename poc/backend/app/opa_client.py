@@ -17,21 +17,28 @@ import urllib.request
 OPA_URL = os.environ.get("OPA_URL", "http://opa:8181")
 
 
-def check(user: str, resource: str, action: str) -> bool:
+def decide(user: str, resource: str, action: str) -> dict:
+    """OPA's full answer from data.app: {allow, reason, user_org?,
+    resource_org?} — reason says which check failed (see app.rego)."""
     payload = json.dumps({"input": {"user": user, "resource": resource, "action": action}}).encode()
     req = urllib.request.Request(
-        f"{OPA_URL}/v1/data/app/allow",
+        f"{OPA_URL}/v1/data/app",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=3) as resp:
-            body = json.loads(resp.read())
-            return bool(body.get("result", False))
+            result = json.loads(resp.read()).get("result") or {}
     except Exception as err:  # noqa: BLE001 — fail closed: any OPA/network error denies the request
         print(f"[opa] check failed, denying by default: {err}")
-        return False
+        return {"allow": False, "reason": "opa_unreachable"}
+    result["allow"] = bool(result.get("allow", False))
+    return result
+
+
+def check(user: str, resource: str, action: str) -> bool:
+    return decide(user, resource, action)["allow"]
 
 
 def push_policy_data(data: dict) -> None:

@@ -105,6 +105,28 @@ def get_catalog(user: str):
     return tree
 
 
+def deny_message(user: str, resource: str, action: str, verdict: dict) -> str:
+    """Human-readable form of OPA's deny reason (opa/policies/app.rego)."""
+    reason = verdict["reason"]
+    user_org = verdict.get("user_org", "?")
+    resource_org = verdict.get("resource_org", "?")
+    messages = {
+        "no_grant": f"no policy grants '{user}' {action} on '{resource}' — not directly, "
+                    "not via a group, not via a parent resource.",
+        "org_mismatch": f"'{user}' has a matching grant, but belongs to {user_org} while "
+                        f"'{resource}' belongs to {resource_org}. Grants never cross the "
+                        "organization boundary.",
+        "user_org_unknown": f"'{user}' has no organization attribute — unknown identities "
+                            "are denied (fail closed).",
+        "resource_org_unknown": f"'{resource}' isn't tagged with an organization — untagged "
+                                "resources are denied (fail closed).",
+        "policy_data_missing": "OPA has no policy data loaded yet (cold start) — everything "
+                               "is denied until the backend pushes it.",
+        "opa_unreachable": "OPA could not be reached — denied by default (fail closed).",
+    }
+    return f"OPA denied this request — {messages.get(reason, reason)}"
+
+
 class QueryRequest(BaseModel):
     user: str
     resource: str  # e.g. "sales.customers"
@@ -117,14 +139,15 @@ def query(req: QueryRequest):
     if "." not in req.resource:
         raise HTTPException(status_code=400, detail="pick a table, not a schema, to run a query")
 
-    allowed = opa_client.check(req.user, req.resource, "select")
+    verdict = opa_client.decide(req.user, req.resource, "select")
     decision = {"sub": req.user, "obj": req.resource, "act": "select"}
 
-    if not allowed:
+    if not verdict["allow"]:
         return {
             "allowed": False,
             "request": decision,
-            "message": f"OPA denied this request — no policy grants '{req.user}' select on '{req.resource}'.",
+            "reason": verdict["reason"],
+            "message": deny_message(req.user, req.resource, "select", verdict),
         }
 
     schema, table = req.resource.split(".", 1)

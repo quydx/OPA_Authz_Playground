@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio:latest
+          image: pgsty/minio:latest
           args: ["server", "/data", "--console-address", ":9001"]
           envFrom:
             - secretRef: {name: idma-minio-secret}
@@ -75,7 +75,7 @@ spec:
               done
       containers:
         - name: minio-init
-          image: minio/mc:latest
+          image: pgsty/minio:latest
           command: ["sh", "/init.sh"]
           env:
             - {name: MINIO_ENDPOINT, value: "http://idma-minio:9000"}
