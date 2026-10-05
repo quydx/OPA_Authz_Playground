@@ -3,6 +3,13 @@
 # kubectl reports "unknown anchor referenced" if you try) — so the same
 # env/volumeMounts/volumes block is spelled out on each workload below
 # instead of shared via anchor.
+#
+# image: now a custom build (see poc/airflow/Dockerfile) instead of stock
+# apache/airflow:3.0.6 — train_sample_model needs mlflow-skinny, which the
+# stock image doesn't carry. Must be built and pushed to
+# ai-repository.vnpt.vn/idma/idma-poc-airflow:latest (same registry as the
+# backend/frontend images above) before these manifests will actually pull
+# successfully — that push isn't something these YAML files can do.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -16,9 +23,11 @@ spec:
       labels: {app: idma-airflow-init}
     spec:
       restartPolicy: Never
+      imagePullSecrets:
+        - name: ai-registry
       containers:
         - name: airflow-init
-          image: apache/airflow:3.0.6
+          image: ai-repository.vnpt.vn/idma/idma-poc-airflow:latest
           command: ["airflow", "db", "migrate"]
           env:
             - {name: AIRFLOW__CORE__EXECUTOR, value: "LocalExecutor"}
@@ -29,22 +38,50 @@ spec:
             - {name: AIRFLOW__CORE__LOAD_EXAMPLES, value: "false"}
             - {name: AIRFLOW__CORE__EXECUTION_API_SERVER_URL, value: "http://idma-airflow-apiserver:8080/execution/"}
             - {name: AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK, value: "true"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS, value: "alice:USER,bob:USER,carol:USER,dave:VIEWER,erin:USER"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS, value: "false"}
+            # FabAuthManager's default session backend expects a "session"
+            # table this POC never migrates in — signed-cookie sessions
+            # need no table and are plenty for a demo (session dies if
+            # SECRET_KEY isn't fixed and the apiserver restarts, which is
+            # fine here).
+            - {name: AIRFLOW__FAB__SESSION_BACKEND, value: "securecookie"}
+            # Fixed so a session survives an apiserver restart — POC-only
+            # value, same reasoning as AIRFLOW__API_AUTH__JWT_SECRET below.
+            - {name: AIRFLOW__WEBSERVER__SECRET_KEY, value: "poc-airflow-webserver-secret-key"}
             - {name: OPA_URL, value: "http://idma-opa:8181"}
+            # Separate from AIRFLOW__WEBSERVER__SECRET_KEY: signs/validates
+            # the internal Task Execution API's JWTs (every task-instance
+            # start/heartbeat handoff between scheduler and apiserver). Left
+            # unset, each pod auto-generates its own random value on first
+            # use, the scheduler-signed token then never validates against
+            # the apiserver's own independently-generated secret, and every
+            # task fails immediately with "Signature verification failed"
+            # before it ever runs. Fixed here for the same reason the
+            # docker-compose stack needed this fix. POC-only value.
+            - {name: AIRFLOW__API_AUTH__JWT_SECRET, value: "poc-airflow-jwt-secret"}
+            # train_sample_model's only mlflow-specific config — artifacts are
+            # proxied through the tracking server (--serve-artifacts, see
+            # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
+            - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
+            - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
           volumeMounts:
             - {name: dags, mountPath: /opt/airflow/dags/sales_etl.py, subPath: sales_etl.py}
             - {name: dags, mountPath: /opt/airflow/dags/hr_payroll_sync.py, subPath: hr_payroll_sync.py}
             - {name: dags, mountPath: /opt/airflow/dags/customer_export.py, subPath: customer_export.py}
             - {name: dags, mountPath: /opt/airflow/dags/org2_etl.py, subPath: org2_etl.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_sample_model.py, subPath: train_sample_model.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_eval_pipeline.py, subPath: train_eval_pipeline.py}
+            - {name: dags, mountPath: /opt/airflow/dags/automl_wizard_pipeline.py, subPath: automl_wizard_pipeline.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/__init__.py, subPath: __init__.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/auth_manager.py, subPath: auth_manager.py}
+            - {name: webserver-config, mountPath: /opt/airflow/webserver_config.py, subPath: webserver_config.py}
             - {name: logs, mountPath: /opt/airflow/logs}
       volumes:
         - name: dags
           configMap: {name: idma-airflow-dags}
         - name: plugin
           configMap: {name: idma-airflow-plugin}
+        - name: webserver-config
+          configMap: {name: idma-airflow-webserver-config}
         - name: logs
           emptyDir: {}
 ---
@@ -62,9 +99,11 @@ spec:
     metadata:
       labels: {app: idma-airflow-apiserver}
     spec:
+      imagePullSecrets:
+        - name: ai-registry
       containers:
         - name: airflow-apiserver
-          image: apache/airflow:3.0.6
+          image: ai-repository.vnpt.vn/idma/idma-poc-airflow:latest
           command: ["airflow", "api-server"]
           env:
             - {name: AIRFLOW__CORE__EXECUTOR, value: "LocalExecutor"}
@@ -75,9 +114,31 @@ spec:
             - {name: AIRFLOW__CORE__LOAD_EXAMPLES, value: "false"}
             - {name: AIRFLOW__CORE__EXECUTION_API_SERVER_URL, value: "http://idma-airflow-apiserver:8080/execution/"}
             - {name: AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK, value: "true"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS, value: "alice:USER,bob:USER,carol:USER,dave:VIEWER,erin:USER"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS, value: "false"}
+            # FabAuthManager's default session backend expects a "session"
+            # table this POC never migrates in — signed-cookie sessions
+            # need no table and are plenty for a demo (session dies if
+            # SECRET_KEY isn't fixed and the apiserver restarts, which is
+            # fine here).
+            - {name: AIRFLOW__FAB__SESSION_BACKEND, value: "securecookie"}
+            # Fixed so a session survives an apiserver restart — POC-only
+            # value, same reasoning as AIRFLOW__API_AUTH__JWT_SECRET below.
+            - {name: AIRFLOW__WEBSERVER__SECRET_KEY, value: "poc-airflow-webserver-secret-key"}
             - {name: OPA_URL, value: "http://idma-opa:8181"}
+            # Separate from AIRFLOW__WEBSERVER__SECRET_KEY: signs/validates
+            # the internal Task Execution API's JWTs (every task-instance
+            # start/heartbeat handoff between scheduler and apiserver). Left
+            # unset, each pod auto-generates its own random value on first
+            # use, the scheduler-signed token then never validates against
+            # the apiserver's own independently-generated secret, and every
+            # task fails immediately with "Signature verification failed"
+            # before it ever runs. Fixed here for the same reason the
+            # docker-compose stack needed this fix. POC-only value.
+            - {name: AIRFLOW__API_AUTH__JWT_SECRET, value: "poc-airflow-jwt-secret"}
+            # train_sample_model's only mlflow-specific config — artifacts are
+            # proxied through the tracking server (--serve-artifacts, see
+            # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
+            - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
+            - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
           ports:
             - containerPort: 8080
           volumeMounts:
@@ -85,8 +146,12 @@ spec:
             - {name: dags, mountPath: /opt/airflow/dags/hr_payroll_sync.py, subPath: hr_payroll_sync.py}
             - {name: dags, mountPath: /opt/airflow/dags/customer_export.py, subPath: customer_export.py}
             - {name: dags, mountPath: /opt/airflow/dags/org2_etl.py, subPath: org2_etl.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_sample_model.py, subPath: train_sample_model.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_eval_pipeline.py, subPath: train_eval_pipeline.py}
+            - {name: dags, mountPath: /opt/airflow/dags/automl_wizard_pipeline.py, subPath: automl_wizard_pipeline.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/__init__.py, subPath: __init__.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/auth_manager.py, subPath: auth_manager.py}
+            - {name: webserver-config, mountPath: /opt/airflow/webserver_config.py, subPath: webserver_config.py}
             - {name: logs, mountPath: /opt/airflow/logs}
           readinessProbe:
             httpGet: {path: /api/v2/version, port: 8080}
@@ -94,13 +159,21 @@ spec:
             periodSeconds: 10
             failureThreshold: 12
           resources:
-            requests: {cpu: "300m", memory: "512Mi"}
-            limits: {cpu: "2000m", memory: "1Gi"}
+            # 1Gi worked fine for 20 days on the stock image — OOMKilled
+            # within minutes of switching to the custom image (adds
+            # mlflow-skinny + transitive deps to every one of this
+            # apiserver's 4 worker processes). Measured OOM at 1Gi;
+            # scheduler/dag-processor are single-process daemons and
+            # didn't need the same bump.
+            requests: {cpu: "300m", memory: "768Mi"}
+            limits: {cpu: "2000m", memory: "1536Mi"}
       volumes:
         - name: dags
           configMap: {name: idma-airflow-dags}
         - name: plugin
           configMap: {name: idma-airflow-plugin}
+        - name: webserver-config
+          configMap: {name: idma-airflow-webserver-config}
         - name: logs
           emptyDir: {}
 ---
@@ -132,9 +205,11 @@ spec:
     metadata:
       labels: {app: idma-airflow-scheduler}
     spec:
+      imagePullSecrets:
+        - name: ai-registry
       containers:
         - name: airflow-scheduler
-          image: apache/airflow:3.0.6
+          image: ai-repository.vnpt.vn/idma/idma-poc-airflow:latest
           command: ["airflow", "scheduler"]
           env:
             - {name: AIRFLOW__CORE__EXECUTOR, value: "LocalExecutor"}
@@ -145,16 +220,42 @@ spec:
             - {name: AIRFLOW__CORE__LOAD_EXAMPLES, value: "false"}
             - {name: AIRFLOW__CORE__EXECUTION_API_SERVER_URL, value: "http://idma-airflow-apiserver:8080/execution/"}
             - {name: AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK, value: "true"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS, value: "alice:USER,bob:USER,carol:USER,dave:VIEWER,erin:USER"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS, value: "false"}
+            # FabAuthManager's default session backend expects a "session"
+            # table this POC never migrates in — signed-cookie sessions
+            # need no table and are plenty for a demo (session dies if
+            # SECRET_KEY isn't fixed and the apiserver restarts, which is
+            # fine here).
+            - {name: AIRFLOW__FAB__SESSION_BACKEND, value: "securecookie"}
+            # Fixed so a session survives an apiserver restart — POC-only
+            # value, same reasoning as AIRFLOW__API_AUTH__JWT_SECRET below.
+            - {name: AIRFLOW__WEBSERVER__SECRET_KEY, value: "poc-airflow-webserver-secret-key"}
             - {name: OPA_URL, value: "http://idma-opa:8181"}
+            # Separate from AIRFLOW__WEBSERVER__SECRET_KEY: signs/validates
+            # the internal Task Execution API's JWTs (every task-instance
+            # start/heartbeat handoff between scheduler and apiserver). Left
+            # unset, each pod auto-generates its own random value on first
+            # use, the scheduler-signed token then never validates against
+            # the apiserver's own independently-generated secret, and every
+            # task fails immediately with "Signature verification failed"
+            # before it ever runs. Fixed here for the same reason the
+            # docker-compose stack needed this fix. POC-only value.
+            - {name: AIRFLOW__API_AUTH__JWT_SECRET, value: "poc-airflow-jwt-secret"}
+            # train_sample_model's only mlflow-specific config — artifacts are
+            # proxied through the tracking server (--serve-artifacts, see
+            # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
+            - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
+            - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
           volumeMounts:
             - {name: dags, mountPath: /opt/airflow/dags/sales_etl.py, subPath: sales_etl.py}
             - {name: dags, mountPath: /opt/airflow/dags/hr_payroll_sync.py, subPath: hr_payroll_sync.py}
             - {name: dags, mountPath: /opt/airflow/dags/customer_export.py, subPath: customer_export.py}
             - {name: dags, mountPath: /opt/airflow/dags/org2_etl.py, subPath: org2_etl.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_sample_model.py, subPath: train_sample_model.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_eval_pipeline.py, subPath: train_eval_pipeline.py}
+            - {name: dags, mountPath: /opt/airflow/dags/automl_wizard_pipeline.py, subPath: automl_wizard_pipeline.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/__init__.py, subPath: __init__.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/auth_manager.py, subPath: auth_manager.py}
+            - {name: webserver-config, mountPath: /opt/airflow/webserver_config.py, subPath: webserver_config.py}
             - {name: logs, mountPath: /opt/airflow/logs}
           resources:
             requests: {cpu: "300m", memory: "512Mi"}
@@ -164,6 +265,8 @@ spec:
           configMap: {name: idma-airflow-dags}
         - name: plugin
           configMap: {name: idma-airflow-plugin}
+        - name: webserver-config
+          configMap: {name: idma-airflow-webserver-config}
         - name: logs
           emptyDir: {}
 ---
@@ -181,9 +284,11 @@ spec:
     metadata:
       labels: {app: idma-airflow-dag-processor}
     spec:
+      imagePullSecrets:
+        - name: ai-registry
       containers:
         - name: airflow-dag-processor
-          image: apache/airflow:3.0.6
+          image: ai-repository.vnpt.vn/idma/idma-poc-airflow:latest
           command: ["airflow", "dag-processor"]
           env:
             - {name: AIRFLOW__CORE__EXECUTOR, value: "LocalExecutor"}
@@ -194,16 +299,42 @@ spec:
             - {name: AIRFLOW__CORE__LOAD_EXAMPLES, value: "false"}
             - {name: AIRFLOW__CORE__EXECUTION_API_SERVER_URL, value: "http://idma-airflow-apiserver:8080/execution/"}
             - {name: AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK, value: "true"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS, value: "alice:USER,bob:USER,carol:USER,dave:VIEWER,erin:USER"}
-            - {name: AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS, value: "false"}
+            # FabAuthManager's default session backend expects a "session"
+            # table this POC never migrates in — signed-cookie sessions
+            # need no table and are plenty for a demo (session dies if
+            # SECRET_KEY isn't fixed and the apiserver restarts, which is
+            # fine here).
+            - {name: AIRFLOW__FAB__SESSION_BACKEND, value: "securecookie"}
+            # Fixed so a session survives an apiserver restart — POC-only
+            # value, same reasoning as AIRFLOW__API_AUTH__JWT_SECRET below.
+            - {name: AIRFLOW__WEBSERVER__SECRET_KEY, value: "poc-airflow-webserver-secret-key"}
             - {name: OPA_URL, value: "http://idma-opa:8181"}
+            # Separate from AIRFLOW__WEBSERVER__SECRET_KEY: signs/validates
+            # the internal Task Execution API's JWTs (every task-instance
+            # start/heartbeat handoff between scheduler and apiserver). Left
+            # unset, each pod auto-generates its own random value on first
+            # use, the scheduler-signed token then never validates against
+            # the apiserver's own independently-generated secret, and every
+            # task fails immediately with "Signature verification failed"
+            # before it ever runs. Fixed here for the same reason the
+            # docker-compose stack needed this fix. POC-only value.
+            - {name: AIRFLOW__API_AUTH__JWT_SECRET, value: "poc-airflow-jwt-secret"}
+            # train_sample_model's only mlflow-specific config — artifacts are
+            # proxied through the tracking server (--serve-artifacts, see
+            # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
+            - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
+            - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
           volumeMounts:
             - {name: dags, mountPath: /opt/airflow/dags/sales_etl.py, subPath: sales_etl.py}
             - {name: dags, mountPath: /opt/airflow/dags/hr_payroll_sync.py, subPath: hr_payroll_sync.py}
             - {name: dags, mountPath: /opt/airflow/dags/customer_export.py, subPath: customer_export.py}
             - {name: dags, mountPath: /opt/airflow/dags/org2_etl.py, subPath: org2_etl.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_sample_model.py, subPath: train_sample_model.py}
+            - {name: dags, mountPath: /opt/airflow/dags/train_eval_pipeline.py, subPath: train_eval_pipeline.py}
+            - {name: dags, mountPath: /opt/airflow/dags/automl_wizard_pipeline.py, subPath: automl_wizard_pipeline.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/__init__.py, subPath: __init__.py}
             - {name: plugin, mountPath: /opt/airflow/plugins/opa_auth_manager/auth_manager.py, subPath: auth_manager.py}
+            - {name: webserver-config, mountPath: /opt/airflow/webserver_config.py, subPath: webserver_config.py}
             - {name: logs, mountPath: /opt/airflow/logs}
           resources:
             requests: {cpu: "300m", memory: "512Mi"}
@@ -213,5 +344,7 @@ spec:
           configMap: {name: idma-airflow-dags}
         - name: plugin
           configMap: {name: idma-airflow-plugin}
+        - name: webserver-config
+          configMap: {name: idma-airflow-webserver-config}
         - name: logs
           emptyDir: {}

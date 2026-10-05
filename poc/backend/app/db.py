@@ -56,6 +56,11 @@ SCHEMA_STATEMENTS = [
     # column in place. The default matches every pre-org demo user, who
     # were all implicitly org-001 anyway.
     "ALTER TABLE user_attributes ADD COLUMN IF NOT EXISTS org TEXT NOT NULL DEFAULT 'org-001'",
+    # Same idea, for the Users tab (see main.py's /api/users CRUD): display
+    # name and job title, previously only ever held in seed.py's DEMO_USERS
+    # dict and never persisted for a user created live through the UI.
+    "ALTER TABLE user_attributes ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE user_attributes ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''",
     """
     CREATE TABLE IF NOT EXISTS resource_org (
         resource TEXT PRIMARY KEY,
@@ -113,10 +118,17 @@ def seed_if_empty() -> bool:
         for username, info in DEMO_USERS.items():
             conn.execute(
                 text(
-                    "INSERT INTO user_attributes (username, region, is_hr, org) VALUES (:u, :r, :h, :o) "
-                    "ON CONFLICT DO NOTHING"
+                    "INSERT INTO user_attributes (username, label, title, region, is_hr, org) "
+                    "VALUES (:u, :l, :t, :r, :h, :o) ON CONFLICT DO NOTHING"
                 ),
-                {"u": username, "r": info["region"], "h": info["hr"], "o": info["org"]},
+                {
+                    "u": username,
+                    "l": info["label"],
+                    "t": info["title"],
+                    "r": info["region"],
+                    "h": info["hr"],
+                    "o": info["org"],
+                },
             )
         for resource, org in RESOURCE_ORG.items():
             conn.execute(
@@ -139,15 +151,32 @@ def sync_non_revocable_seed_data() -> None:
     silently undo a live revoke. New rows for INITIAL_POLICIES only reach
     an already-seeded database the same way this whole file recommends in
     README.md — a one-time manual insert, or `docker-compose down -v`.
+
+    `user_attributes` rows for the DEMO_USERS keys are the same story now
+    that the Users tab (see main.py's /api/users CRUD) lets org/region/HR/
+    label/title be edited live for any user, including the five seed ones
+    — ON CONFLICT DO NOTHING here, same reasoning as the `policies`
+    exclusion above: unconditionally re-applying seed.py's values on every
+    startup would silently undo a live edit to alice/bob/carol/dave/erin's
+    row. A *new* key added to DEMO_USERS in seed.py still reaches an
+    already-seeded database fine — there's no existing row for it to
+    conflict with.
     """
     with engine.begin() as conn:
         for username, info in DEMO_USERS.items():
             conn.execute(
                 text(
-                    "INSERT INTO user_attributes (username, region, is_hr, org) VALUES (:u, :r, :h, :o) "
-                    "ON CONFLICT (username) DO UPDATE SET org = EXCLUDED.org"
+                    "INSERT INTO user_attributes (username, label, title, region, is_hr, org) "
+                    "VALUES (:u, :l, :t, :r, :h, :o) ON CONFLICT (username) DO NOTHING"
                 ),
-                {"u": username, "r": info["region"], "h": info["hr"], "o": info["org"]},
+                {
+                    "u": username,
+                    "l": info["label"],
+                    "t": info["title"],
+                    "r": info["region"],
+                    "h": info["hr"],
+                    "o": info["org"],
+                },
             )
         for member, grp in GROUP_MEMBERSHIP:
             conn.execute(
@@ -205,4 +234,113 @@ def remove_policy(sub: str, obj: str, act: str) -> bool:
             text("DELETE FROM policies WHERE subject = :s AND resource = :o AND action = :a"),
             {"s": sub, "o": obj, "a": act},
         )
+        return result.rowcount > 0
+
+
+# ---------------------------------------------------------------------
+# Users CRUD (see main.py's /api/users) — this table, not seed.py's
+# DEMO_USERS dict, is the runtime source of truth for "does this user
+# exist" once the backend has started, same as the module docstring
+# above always intended for the rest of policy_data.
+# ---------------------------------------------------------------------
+
+
+def known_subjects() -> list[str]:
+    """Every subject a grant/revoke form can target: every user this app
+    knows about (not just the five seeded ones) plus every group name in
+    use — see main.py's /api/policy-options and /api/airflow/policy-options."""
+    with engine.connect() as conn:
+        usernames = [row[0] for row in conn.execute(text("SELECT username FROM user_attributes ORDER BY username"))]
+        groups = sorted({row[0] for row in conn.execute(text("SELECT DISTINCT grp FROM group_membership"))})
+    return usernames + groups
+
+
+def list_users() -> list[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT username, label, title, region, is_hr, org FROM user_attributes ORDER BY username")
+        ).fetchall()
+        g = conn.execute(text("SELECT member, grp FROM group_membership")).fetchall()
+    groups_by_user: dict[str, list[str]] = {}
+    for member, grp in g:
+        groups_by_user.setdefault(member, []).append(grp)
+    return [
+        {
+            "id": row.username,
+            "label": row.label,
+            "title": row.title,
+            "region": row.region,
+            "hr": row.is_hr,
+            "org": row.org,
+            "groups": groups_by_user.get(row.username, []),
+        }
+        for row in rows
+    ]
+
+
+def get_user(username: str) -> dict | None:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT username, label, title, region, is_hr, org FROM user_attributes WHERE username = :u"),
+            {"u": username},
+        ).first()
+        if not row:
+            return None
+        groups = [
+            r[0]
+            for r in conn.execute(text("SELECT grp FROM group_membership WHERE member = :u"), {"u": username})
+        ]
+    return {
+        "id": row.username,
+        "label": row.label,
+        "title": row.title,
+        "region": row.region,
+        "hr": row.is_hr,
+        "org": row.org,
+        "groups": groups,
+    }
+
+
+def create_user_attributes(username: str, label: str, title: str, region: str, is_hr: bool, org: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO user_attributes (username, label, title, region, is_hr, org) "
+                "VALUES (:u, :l, :t, :r, :h, :o)"
+            ),
+            {"u": username, "l": label, "t": title, "r": region, "h": is_hr, "o": org},
+        )
+
+
+def update_user_attributes(username: str, label: str, title: str, region: str, is_hr: bool, org: str) -> bool:
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                "UPDATE user_attributes SET label = :l, title = :t, region = :r, is_hr = :h, org = :o "
+                "WHERE username = :u"
+            ),
+            {"u": username, "l": label, "t": title, "r": region, "h": is_hr, "o": org},
+        )
+        return result.rowcount > 0
+
+
+def set_user_groups(username: str, groups: list[str]) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM group_membership WHERE member = :u"), {"u": username})
+        for grp in groups:
+            conn.execute(
+                text("INSERT INTO group_membership (member, grp) VALUES (:u, :g) ON CONFLICT DO NOTHING"),
+                {"u": username, "g": grp},
+            )
+
+
+def delete_user_attributes(username: str) -> bool:
+    """Cascades to the rows only this username could own: its group
+    memberships and any direct policy grants naming it as subject. Group
+    grants (subject = a group name) are untouched — those belong to the
+    group, not this one member of it."""
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM policies WHERE subject = :u"), {"u": username})
+        conn.execute(text("DELETE FROM group_membership WHERE member = :u"), {"u": username})
+        result = conn.execute(text("DELETE FROM user_attributes WHERE username = :u"), {"u": username})
         return result.rowcount > 0

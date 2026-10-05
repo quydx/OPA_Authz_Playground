@@ -18,17 +18,21 @@
       </div>
     </div>
     <div class="user-switch">
-      <label for="user-select">Acting as</label>
-      <select id="user-select"></select>
+      <label>Logged in as</label>
+      <span id="user-name" class="mono"></span>
       <span id="user-org" class="org-tag"></span>
       <span id="user-groups" class="groups-tag"></span>
+      <button type="button" id="logout-btn" class="btn btn-deny">Log out</button>
     </div>
   </header>
 
   <nav class="tabs">
     <button type="button" class="tab-btn active" data-tab="catalog">Data Catalog</button>
     <button type="button" class="tab-btn" data-tab="airflow">Airflow Jobs</button>
+    <button type="button" class="tab-btn" data-tab="policies">Policies</button>
+    <button type="button" class="tab-btn" data-tab="models">Models</button>
     <button type="button" class="tab-btn" data-tab="storage">Storage</button>
+    <button type="button" class="tab-btn" data-tab="users">Users</button>
     <button type="button" class="tab-btn" data-tab="architecture">Architecture</button>
     <button type="button" class="tab-btn" data-tab="services">Services</button>
     <button type="button" class="tab-btn" data-tab="credentials">Credentials</button>
@@ -45,7 +49,22 @@
       <h2>Result</h2>
       <div id="result" class="result-empty">Pick a table on the left to see what OPA decides.</div>
     </section>
+  </main>
 
+  <main class="layout-single" id="tab-airflow" hidden>
+    <section class="panel dags-panel">
+      <h2>Jobs (Dags)</h2>
+      <p class="hint">
+        One permission chip per action Airflow's Auth Manager checks per Dag — <code>view</code>, <code>trigger</code>,
+        <code>view_logs</code>, <code>view_code</code>. Every chip here is the same <code>data.app.allow</code> OPA
+        decision that <code>opa_auth_manager</code> makes natively inside Airflow itself via
+        <code>data.airflow.allow</code> — this tab never talks to Airflow, it previews the policy.
+      </p>
+      <div id="dag-list" class="dag-list"></div>
+    </section>
+  </main>
+
+  <main class="layout-single" id="tab-policies" hidden>
     <section class="panel policy-panel">
       <h2>Policy inspector</h2>
       <p class="hint">Live contents of the authz database — pushed into OPA after every change.</p>
@@ -69,7 +88,7 @@
       </div>
 
       <h2 class="grant-title">Live demo: grant / revoke</h2>
-      <p class="hint">Change a policy, then click a table again on the left — no restart needed.</p>
+      <p class="hint">Change a policy, then click a table again on the Data Catalog tab — no restart needed.</p>
       <form id="grant-form" class="grant-form">
         <label>Subject
           <select id="grant-sub"></select>
@@ -87,23 +106,10 @@
       </form>
       <p id="grant-status" class="grant-status"></p>
     </section>
-  </main>
-
-  <main class="layout" id="tab-airflow" hidden>
-    <section class="panel dags-panel">
-      <h2>Jobs (Dags)</h2>
-      <p class="hint">
-        One permission chip per action Airflow's Auth Manager checks per Dag — <code>view</code>, <code>trigger</code>,
-        <code>view_logs</code>, <code>view_code</code>. Every chip here is the same <code>data.app.allow</code> OPA
-        decision that <code>opa_auth_manager</code> makes natively inside Airflow itself via
-        <code>data.airflow.allow</code> — this tab never talks to Airflow, it previews the policy.
-      </p>
-      <div id="dag-list" class="dag-list"></div>
-    </section>
 
     <section class="panel airflow-policy-panel">
       <h2>Policy inspector — Airflow</h2>
-      <p class="hint">Same authz database as the Data Catalog tab, filtered to <code>airflow.dag.*</code> resources.</p>
+      <p class="hint">Same authz database as above, filtered to <code>airflow.dag.*</code> resources.</p>
       <div class="policy-tables policy-tables-3">
         <div>
           <h3><span class="tok tok-p">p</span> policies — subject, resource, action</h3>
@@ -140,6 +146,39 @@
     </section>
   </main>
 
+  <main class="layout" id="tab-models" hidden>
+    <section class="panel models-panel">
+      <h2>Trained models</h2>
+      <p class="hint">
+        Live from MLflow's Model Registry (<code>GET /api/models</code>) — trained by the
+        <code>train_sample_model</code> Airflow Dag on the Jobs tab. Click <strong>Deploy</strong> on a version to
+        point the <code>production</code> alias at it and load it into the backend's in-memory serving cache.
+      </p>
+      <div id="model-list" class="model-list"></div>
+    </section>
+
+    <section class="panel model-invoke-panel">
+      <h2>Try the deployed model</h2>
+      <p class="hint">
+        Sends feature rows straight to <code>POST /api/models/&lt;name&gt;/invoke</code>, which runs
+        <code>predict()</code> on whichever version currently carries the <code>production</code> alias — the
+        same model object <code>train_sample_model</code> logged, loaded back with <code>mlflow.pyfunc</code>.
+      </p>
+      <form id="model-invoke-form" class="grant-form model-invoke-form">
+        <label>Model
+          <select id="model-invoke-select"></select>
+        </label>
+        <label class="model-invoke-rows-label">Feature rows (JSON array of arrays)
+          <textarea id="model-invoke-rows" rows="4">[[5.1, 3.5, 1.4, 0.2], [6.7, 3.1, 4.7, 1.5]]</textarea>
+        </label>
+        <div class="grant-actions">
+          <button type="submit" class="btn btn-allow">Run inference</button>
+        </div>
+      </form>
+      <div id="model-invoke-result" class="result-empty">Deploy a model version, then run inference here.</div>
+    </section>
+  </main>
+
   <main class="layout" id="tab-storage" hidden>
     <section class="panel storage-panel">
       <h2>Files <span id="storage-bucket-tag" class="org-chip"></span></h2>
@@ -160,6 +199,72 @@
       <p class="hint">Uses your own org's MinIO credentials against the other organization's bucket — deliberately.</p>
       <button type="button" id="storage-cross-check-btn" class="btn btn-deny">Try the other org's bucket</button>
       <div id="storage-cross-check-result" class="result-empty"></div>
+    </section>
+  </main>
+
+  <main class="layout-single" id="tab-users" hidden>
+    <section class="panel arch-panel">
+      <h2>Users</h2>
+      <p class="hint">
+        Full CRUD against both sides of this app's identity story: a real Keycloak account (so the person
+        can actually log in and get a JWT — see <code>keycloak_admin.py</code>) and this app's own row in
+        the authz database (label, title, org, region, HR flag, group membership — see
+        <code>db.py</code>'s <code>user_attributes</code> table). Group membership here is the <span
+        class="tok tok-g">g</span> relation the Data Catalog and Airflow Jobs policy inspectors show —
+        grant/revoke <em>policies</em> for a group from those tabs, same as any other subject.
+      </p>
+      <div class="users-toolbar">
+        <button type="button" id="user-new-btn" class="btn btn-allow">+ New user</button>
+      </div>
+      <div class="result-table-wrap">
+        <table class="data-table" id="users-table">
+          <thead>
+            <tr>
+              <th>Username</th><th>Name</th><th>Title</th><th>Org</th><th>Region</th><th>HR</th><th>Groups</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="users-status" class="grant-status"></p>
+
+      <form id="user-form" class="grant-form user-form" hidden>
+        <h3 id="user-form-title" class="grant-title">New user</h3>
+        <label>Username
+          <input type="text" id="user-username" required minlength="1" pattern="[a-zA-Z0-9_.-]+" />
+        </label>
+        <label>First name
+          <input type="text" id="user-first-name" required />
+        </label>
+        <label>Last name
+          <input type="text" id="user-last-name" required />
+        </label>
+        <label>Email
+          <input type="email" id="user-email" />
+        </label>
+        <label>Password
+          <input type="password" id="user-password" minlength="4" />
+        </label>
+        <label>Title
+          <input type="text" id="user-title" placeholder="e.g. Analyst" />
+        </label>
+        <label>Organization
+          <select id="user-org-input"></select>
+        </label>
+        <label>Region
+          <input type="text" id="user-region" placeholder="e.g. APAC" required />
+        </label>
+        <label class="user-form-checkbox">HR
+          <input type="checkbox" id="user-hr" />
+        </label>
+        <label>Groups
+          <input type="text" id="user-groups-input" placeholder="grp_data_eng, grp_hr" />
+        </label>
+        <div class="grant-actions">
+          <button type="submit" class="btn btn-allow">Save</button>
+          <button type="button" id="user-form-cancel" class="btn btn-deny">Cancel</button>
+        </div>
+      </form>
     </section>
   </main>
 
@@ -298,14 +403,14 @@
       <h2>Demo credentials</h2>
       <p class="hint">
         Lab-only values, same across docker-compose and Kubernetes unless noted — never do this for a real
-        deployment. Airflow's passwords are the one exception: <code>SimpleAuthManager</code> generates a
-        fresh random password for each user every time the apiserver process starts, printed once to that
-        pod's own logs — there's no fixed value to show here.
+        deployment. Trino and Airflow are the two exceptions: both log in through Keycloak (the "Keycloak"
+        row above) instead of having their own separate password.
       </p>
       <div id="credentials-table"></div>
     </section>
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/keycloak-js@25.0.6/dist/keycloak.min.js"></script>
   <script src="config.js"></script>
   <script src="app.js"></script>
 </body>

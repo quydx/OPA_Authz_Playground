@@ -14,13 +14,15 @@ data:
     becomes the answer for all of them.
 
     Login/session handling is NOT reimplemented here — this subclasses
-    SimpleAuthManager and inherits its static username/password/role model
-    (AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS) rather than wiring Keycloak
-    SSO into Airflow, which this POC doesn't attempt. That static role still
+    FabAuthManager (Airflow's classic Flask-AppBuilder auth manager) and
+    inherits its OAuth login flow, configured in webserver_config.py to log
+    in against the same Keycloak realm the frontend and Trino use. Every
+    Keycloak-authenticated user gets FAB's flat "User" role
+    (AUTH_USER_REGISTRATION_ROLE in webserver_config.py) — that role still
     gates the handful of non-Dag resources (connections, variables, pools,
     configuration) this file leaves untouched — only Dag-level authorization
     ("job and entities", the surface this POC's demo focuses on) is
-    delegated to OPA.
+    delegated to OPA, identically regardless of role.
 
     Every is_authorized_dag() call is forwarded to the same OPA instance and
     the same policy_data Trino uses, via opa/policies/airflow.rego — a thin
@@ -36,9 +38,13 @@ data:
     import os
     import urllib.request
 
+    from sqlalchemy import select
+
     from airflow.api_fastapi.auth.managers.models.resource_details import DagAccessEntity, DagDetails
-    from airflow.api_fastapi.auth.managers.simple.simple_auth_manager import SimpleAuthManager
-    from airflow.api_fastapi.auth.managers.simple.user import SimpleAuthManagerUser
+    from airflow.models import DagModel
+    from airflow.providers.fab.auth_manager.fab_auth_manager import FabAuthManager
+    from airflow.providers.fab.auth_manager.models import User
+    from airflow.utils.session import NEW_SESSION, provide_session
 
     log = logging.getLogger(__name__)
 
@@ -90,19 +96,18 @@ data:
         return f"{entity_name}_{str(method).lower()}"
 
 
-    def _is_admin(user: SimpleAuthManagerUser) -> bool:
-        role = user.get_role()
-        return bool(role) and role.upper() == "ADMIN"
+    def _is_admin(user: User) -> bool:
+        return any(role.name == "Admin" for role in (user.roles or []))
 
 
-    class OPAAuthManager(SimpleAuthManager):
-        """SimpleAuthManager plus one override: Dag authorization goes through OPA."""
+    class OPAAuthManager(FabAuthManager):
+        """FabAuthManager plus one override: Dag authorization goes through OPA."""
 
         def is_authorized_dag(
             self,
             *,
             method,
-            user: SimpleAuthManagerUser,
+            user: User,
             access_entity: DagAccessEntity | None = None,
             details: DagDetails | None = None,
         ) -> bool:
@@ -120,6 +125,30 @@ data:
 
             action = _action_for(method, access_entity)
             return _opa_allow(user.username, dag_id, action)
+
+        @provide_session
+        def get_authorized_dag_ids(
+            self,
+            *,
+            user: User,
+            method="GET",
+            session=NEW_SESSION,
+        ) -> set[str]:
+            """Used by the Dag *list* endpoint — a different code path from
+            is_authorized_dag() above, and one FabAuthManager overrides with a
+            shortcut: if the user's FAB role has blanket "read DAG" permission
+            (which the flat AUTH_USER_REGISTRATION_ROLE every Keycloak user
+            gets does, by default), it returns every Dag id without ever
+            calling is_authorized_dag() — silently bypassing OPA for the list
+            view only (single-Dag/trigger/logs endpoints go through
+            is_authorized_dag() directly and were never affected). Overridden
+            back to the plain, correct version: check every Dag individually
+            via filter_authorized_dag_ids(), which does call is_authorized_dag()
+            — fine at this scale (4 demo Dags), and what actually matches what
+            the demo claims.
+            """
+            dag_ids = {dag.dag_id for dag in session.execute(select(DagModel.dag_id))}
+            return self.filter_authorized_dag_ids(dag_ids=dag_ids, method=method, user=user)
 kind: ConfigMap
 metadata:
   creationTimestamp: null

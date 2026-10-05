@@ -13,9 +13,15 @@ spec:
     metadata:
       labels: {app: idma-minio}
     spec:
+      # Docker Hub now denies anonymous pulls of minio/minio and minio/mc
+      # (a MinIO distribution/licensing change, unrelated to this repo) —
+      # both mirrored to our own registry instead. See idma-minio-init
+      # below for the second one.
+      imagePullSecrets:
+        - name: ai-registry
       containers:
         - name: minio
-          image: pgsty/minio:latest
+          image: ai-repository.vnpt.vn/idma/idma-poc-minio:latest
           args: ["server", "/data", "--console-address", ":9001"]
           envFrom:
             - secretRef: {name: idma-minio-secret}
@@ -63,6 +69,8 @@ spec:
       labels: {app: idma-minio-init}
     spec:
       restartPolicy: Never
+      imagePullSecrets:
+        - name: ai-registry
       initContainers:
         - name: wait-for-minio
           image: curlimages/curl:latest
@@ -75,7 +83,7 @@ spec:
               done
       containers:
         - name: minio-init
-          image: pgsty/minio:latest
+          image: ai-repository.vnpt.vn/idma/idma-poc-minio-mc:latest
           command: ["sh", "/init.sh"]
           env:
             - {name: MINIO_ENDPOINT, value: "http://idma-minio:9000"}

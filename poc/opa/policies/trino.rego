@@ -33,12 +33,20 @@ resource_key := sprintf("%s.%s", [table_resource.schemaName, table_resource.tabl
 
 is_select if input.action.operation == "SelectFromColumns"
 
+# Trino's own introspection catalog — system.jdbc.*, system.metadata.*,
+# system.runtime.* — never holds user data, just JDBC-driver metadata
+# (table/column listings, etc.) that every JDBC client, DBeaver included,
+# queries to populate its schema browser. Treated as "browsing", same as
+# SHOW TABLES and friends above, not as a real data read.
+is_system_catalog if table_resource.catalogName == "system"
+
 # Fail CLOSED: if authz.allow doesn't positively return true — including
 # when it's undefined because policy_data hasn't been pushed yet — this
 # denies. `not <undefined>` evaluates to true in Rego, so an OPA/backend
 # outage denies table reads instead of silently allowing them.
 allow := false if {
 	is_select
+	not is_system_catalog
 	not authz.allow(current_user, resource_key, "select")
 }
 
