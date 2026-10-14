@@ -1,1 +1,4 @@
 mlflow-skinny==3.16.1
+# bien_doi_tao_bien()'s SQL-expression derived columns — same engine/same
+# version as backend/requirements.txt, see that file's comment.
+duckdb==1.3.2

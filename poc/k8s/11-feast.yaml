@@ -1,0 +1,179 @@
+# Feature store — registry/online-store/offline-store all on the new
+# `feast` Postgres database (see 00-configmap-postgres-init.yaml's
+# 06-create-feast-db.sql), same "one instance, separate database" pattern
+# as mlflow/airflow (09-mlflow.yaml/08-airflow.yaml). automl_wizard_pipeline's
+# luu_tru_dac_trung task (step 5's parallel "store features" branch) writes
+# into that database directly and calls this service's own HTTP API to
+# materialize into the online store — see poc/feast/Dockerfile for why
+# `feast apply` runs as this container's own startup step rather than a
+# separate init Job (unlike 08-airflow.yaml's idma-airflow-init).
+#
+# image: must be built from poc/feast/Dockerfile and pushed to
+# ai-repository.vnpt.vn/idma/idma-poc-feast:latest before this Deployment
+# will actually pull successfully — same caveat as 08-airflow.yaml/
+# 09-mlflow.yaml's own images.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-feast
+  namespace: bigdata-dev
+  labels: {app: idma-feast, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: idma-feast}
+  template:
+    metadata:
+      labels: {app: idma-feast}
+    spec:
+      imagePullSecrets:
+        - name: ai-registry
+      containers:
+        - name: feast
+          image: ai-repository.vnpt.vn/idma/idma-poc-feast:latest
+          env:
+            # Overrides the image's docker-compose-flavored default (see
+            # poc/feast/Dockerfile) — every other pod reaches Postgres via
+            # this Service's own DNS name, not "postgres".
+            - {name: FEAST_DB_HOST, value: "idma-postgres"}
+          ports:
+            - containerPort: 6566
+          readinessProbe:
+            httpGet: {path: /health, port: 6566}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            # Not yet measured against this cluster (unlike mlflow/
+            # airflow's own resources blocks, which cite real OOM
+            # thresholds) — a single-worker FastAPI app over a Postgres
+            # registry/online/offline store, so start modest and revisit
+            # if it OOMKills.
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "768Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-feast
+  namespace: bigdata-dev
+  labels: {app: idma-feast, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: NodePort
+  selector: {app: idma-feast}
+  ports:
+    - port: 6566
+      targetPort: 6566
+      nodePort: 30566
+---
+# Feast's own bundled registry browser (`feast ui`) — same image as
+# idma-feast above, command overridden to serve the UI instead of the
+# feature server (see poc/feast/Dockerfile's +grpcio comment — `feast
+# serve`/`feast apply` both run fine without it, but `feast ui` needs it).
+# A separate Deployment (not a sidecar in the same pod) so it restarts/
+# scales independently, same "one compose service, one k8s Deployment"
+# pairing as everything else here — see docker-compose.yml's feast-ui.
+# Reads the identical Postgres SQL registry idma-feast populates via
+# `feast apply`, so it needs no apply step of its own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-feast-ui
+  namespace: bigdata-dev
+  labels: {app: idma-feast-ui, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: idma-feast-ui}
+  template:
+    metadata:
+      labels: {app: idma-feast-ui}
+    spec:
+      imagePullSecrets:
+        - name: ai-registry
+      containers:
+        - name: feast-ui
+          image: ai-repository.vnpt.vn/idma/idma-poc-feast:latest
+          command: ["feast", "ui", "-h", "0.0.0.0", "-p", "8888"]
+          env:
+            - {name: FEAST_DB_HOST, value: "idma-postgres"}
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet: {path: /, port: 8888}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "768Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-feast-ui
+  namespace: bigdata-dev
+  labels: {app: idma-feast-ui, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: NodePort
+  selector: {app: idma-feast-ui}
+  ports:
+    - port: 8888
+      targetPort: 8888
+      nodePort: 30567
+---
+# The only thing in this stack with Feast SDK write access to the
+# registry (see poc/feast/registry_api.py) — automl_wizard_pipeline's
+# luu_tru_dac_trung task calls this over HTTP to create-or-update a
+# feature view by name whenever a wizard user checks "save this
+# transformation as a Feature View". Same image as idma-feast/
+# idma-feast-ui, command overridden again. ClusterIP only — nothing
+# outside this stack's own Airflow DAG ever needs to reach it, same
+# "internal-only" treatment idma-opa/idma-postgres already get, and
+# deliberately left out of the frontend's Services tab for the same
+# reason.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idma-feast-admin
+  namespace: bigdata-dev
+  labels: {app: idma-feast-admin, app.kubernetes.io/part-of: idma-poc}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: idma-feast-admin}
+  template:
+    metadata:
+      labels: {app: idma-feast-admin}
+    spec:
+      imagePullSecrets:
+        - name: ai-registry
+      containers:
+        - name: feast-admin
+          image: ai-repository.vnpt.vn/idma/idma-poc-feast:latest
+          command: ["python", "registry_api.py"]
+          env:
+            - {name: FEAST_DB_HOST, value: "idma-postgres"}
+          ports:
+            - containerPort: 6568
+          readinessProbe:
+            httpGet: {path: /health, port: 6568}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "768Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: idma-feast-admin
+  namespace: bigdata-dev
+  labels: {app: idma-feast-admin, app.kubernetes.io/part-of: idma-poc}
+spec:
+  type: ClusterIP
+  selector: {app: idma-feast-admin}
+  ports:
+    - port: 6568
+      targetPort: 6568

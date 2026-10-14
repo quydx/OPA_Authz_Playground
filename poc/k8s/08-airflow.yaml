@@ -28,8 +28,25 @@ spec:
       containers:
         - name: airflow-init
           image: ai-repository.vnpt.vn/idma/idma-poc-airflow:latest
-          command: ["airflow", "db", "migrate"]
+          # `airflow users create` exits non-zero if the user already
+          # exists — `|| true` makes re-running this Job against an
+          # already-initialized database a no-op for that step, same
+          # idempotent-by-design spirit as minio/init.sh. Creates the
+          # local FAB service account backend/app/airflow_client.py
+          # authenticates as (see AIRFLOW_API_USERNAME/PASSWORD below and
+          # 06-backend.yaml) — a local password login, independent of the
+          # Keycloak OAuth flow AUTH_TYPE=AUTH_OAUTH configures for
+          # interactive users (see webserver-config's own comments).
+          command:
+            - bash
+            - -c
+            - >-
+              airflow db migrate &&
+              (airflow users create --username "$AIRFLOW_API_USERNAME" --firstname svc --lastname backend
+              --email svc-backend@idma.local --role Admin --password "$AIRFLOW_API_PASSWORD" || true)
           env:
+            - {name: AIRFLOW_API_USERNAME, value: "svc-backend"}
+            - {name: AIRFLOW_API_PASSWORD, value: "poc-airflow-api-password"}
             - {name: AIRFLOW__CORE__EXECUTOR, value: "LocalExecutor"}
             - {name: AIRFLOW__CORE__AUTH_MANAGER, value: "opa_auth_manager.auth_manager.OPAAuthManager"}
             - {name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN, value: "postgresql+psycopg2://poc:pocpass@idma-postgres:5432/airflow"}
@@ -63,6 +80,19 @@ spec:
             # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
             - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
             - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
+            - {name: DEMO_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/demo"}
+            # luu_tru_dac_trung's two Feast touchpoints — a direct
+            # Postgres write into sales_orders_features (Feast's own
+            # offline-store table) and the feature server's own HTTP API
+            # for materialize-incremental (never the Feast SDK — see that
+            # task's docstring for why).
+            - {name: FEAST_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/feast"}
+            - {name: FEAST_FEATURE_SERVER_URL, value: "http://idma-feast:6566"}
+            # luu_tru_dac_trung's third Feast touchpoint — create/update a
+            # feature view's registry schema by name before inserting its
+            # rows (see poc/feast/registry_api.py / idma-feast-admin in
+            # 11-feast.yaml).
+            - {name: FEAST_ADMIN_URL, value: "http://idma-feast-admin:6568"}
           volumeMounts:
             - {name: dags, mountPath: /opt/airflow/dags/sales_etl.py, subPath: sales_etl.py}
             - {name: dags, mountPath: /opt/airflow/dags/hr_payroll_sync.py, subPath: hr_payroll_sync.py}
@@ -139,6 +169,19 @@ spec:
             # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
             - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
             - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
+            - {name: DEMO_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/demo"}
+            # luu_tru_dac_trung's two Feast touchpoints — a direct
+            # Postgres write into sales_orders_features (Feast's own
+            # offline-store table) and the feature server's own HTTP API
+            # for materialize-incremental (never the Feast SDK — see that
+            # task's docstring for why).
+            - {name: FEAST_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/feast"}
+            - {name: FEAST_FEATURE_SERVER_URL, value: "http://idma-feast:6566"}
+            # luu_tru_dac_trung's third Feast touchpoint — create/update a
+            # feature view's registry schema by name before inserting its
+            # rows (see poc/feast/registry_api.py / idma-feast-admin in
+            # 11-feast.yaml).
+            - {name: FEAST_ADMIN_URL, value: "http://idma-feast-admin:6568"}
           ports:
             - containerPort: 8080
           volumeMounts:
@@ -245,6 +288,19 @@ spec:
             # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
             - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
             - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
+            - {name: DEMO_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/demo"}
+            # luu_tru_dac_trung's two Feast touchpoints — a direct
+            # Postgres write into sales_orders_features (Feast's own
+            # offline-store table) and the feature server's own HTTP API
+            # for materialize-incremental (never the Feast SDK — see that
+            # task's docstring for why).
+            - {name: FEAST_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/feast"}
+            - {name: FEAST_FEATURE_SERVER_URL, value: "http://idma-feast:6566"}
+            # luu_tru_dac_trung's third Feast touchpoint — create/update a
+            # feature view's registry schema by name before inserting its
+            # rows (see poc/feast/registry_api.py / idma-feast-admin in
+            # 11-feast.yaml).
+            - {name: FEAST_ADMIN_URL, value: "http://idma-feast-admin:6568"}
           volumeMounts:
             - {name: dags, mountPath: /opt/airflow/dags/sales_etl.py, subPath: sales_etl.py}
             - {name: dags, mountPath: /opt/airflow/dags/hr_payroll_sync.py, subPath: hr_payroll_sync.py}
@@ -258,8 +314,15 @@ spec:
             - {name: webserver-config, mountPath: /opt/airflow/webserver_config.py, subPath: webserver_config.py}
             - {name: logs, mountPath: /opt/airflow/logs}
           resources:
+            # 1Gi was enough before automl_wizard_pipeline existed — this
+            # scheduler runs LocalExecutor's task subprocesses in its own
+            # container (not separate pods), and that Dag's cau_hinh_va_chay
+            # step (pandas + scikit-learn + mlflow, training + logging a
+            # model) OOMKilled the whole scheduler mid-task at 1Gi
+            # (verified: exitCode 137, reason OOMKilled). 2Gi observed
+            # comfortable headroom for this lab's tiny demo datasets.
             requests: {cpu: "300m", memory: "512Mi"}
-            limits: {cpu: "2000m", memory: "1Gi"}
+            limits: {cpu: "2000m", memory: "2Gi"}
       volumes:
         - name: dags
           configMap: {name: idma-airflow-dags}
@@ -324,6 +387,19 @@ spec:
             # 09-mlflow.yaml), so this pod never needs its own MinIO creds.
             - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
             - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
+            - {name: DEMO_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/demo"}
+            # luu_tru_dac_trung's two Feast touchpoints — a direct
+            # Postgres write into sales_orders_features (Feast's own
+            # offline-store table) and the feature server's own HTTP API
+            # for materialize-incremental (never the Feast SDK — see that
+            # task's docstring for why).
+            - {name: FEAST_DB_DSN, value: "postgresql://poc:pocpass@idma-postgres:5432/feast"}
+            - {name: FEAST_FEATURE_SERVER_URL, value: "http://idma-feast:6566"}
+            # luu_tru_dac_trung's third Feast touchpoint — create/update a
+            # feature view's registry schema by name before inserting its
+            # rows (see poc/feast/registry_api.py / idma-feast-admin in
+            # 11-feast.yaml).
+            - {name: FEAST_ADMIN_URL, value: "http://idma-feast-admin:6568"}
           volumeMounts:
             - {name: dags, mountPath: /opt/airflow/dags/sales_etl.py, subPath: sales_etl.py}
             - {name: dags, mountPath: /opt/airflow/dags/hr_payroll_sync.py, subPath: hr_payroll_sync.py}

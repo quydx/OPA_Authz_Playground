@@ -28,6 +28,8 @@ data:
       { name: "MinIO API", port: 30900, path: "/", desc: "S3 endpoint" },
       { name: "MinIO Console", port: 30901, path: "/", desc: "browser UI" },
       { name: "MLflow", port: 30500, path: "/", desc: "tracking server UI + Model Registry" },
+      { name: "Feast API", port: 30566, path: "/health", desc: "feature server — get-online-features / materialize-incremental REST API" },
+      { name: "Feast UI", port: 30567, path: "/", desc: "registry browser — feature views, entities, data sources, lineage" },
       { name: "Keycloak", port: 30180, path: "/admin/master/console/", desc: "authentication service — realm \"idma\"" },
       { name: "OPA", desc: "policy engine — ClusterIP only" },
       { name: "Postgres", desc: "authz · demo · airflow · mlflow DBs — ClusterIP only" },

@@ -43,6 +43,33 @@ x-airflow-common:
     # never needs its own MinIO credentials to log a model.
     MLFLOW_TRACKING_URI: http://mlflow:5000
     MLFLOW_DISABLE_AGENT_HINT: "1"
+    # automl_wizard_pipeline's only direct-Postgres config — see that
+    # Dag's own DEMO_DB_DSN comment for why this is an env var rather
+    # than a hardcoded hostname.
+    DEMO_DB_DSN: postgresql://poc:pocpass@postgres:5432/demo
+    # luu_tru_dac_trung's three Feast touchpoints: a direct Postgres write
+    # into whichever feature view's own table (fv_<name> — a plain
+    # INSERT, not through the feature server), the feature server's own
+    # HTTP API for materialize-incremental, and idma-feast-admin's own
+    # HTTP API to create/update that feature view's registry schema by
+    # name first (never the Feast SDK itself — see that task's docstring
+    # for why).
+    FEAST_DB_DSN: postgresql://poc:pocpass@postgres:5432/feast
+    FEAST_FEATURE_SERVER_URL: http://feast:6566
+    FEAST_ADMIN_URL: http://feast-admin:6568
+    # Service-account credentials the backend's airflow_client.py uses to
+    # call this apiserver's REST API (trigger/poll automl_wizard_pipeline
+    # runs) — a local FAB user, not a Keycloak login, so it works
+    # independent of AUTH_TYPE=AUTH_OAUTH above. Created by airflow-init
+    # below. Admin role bypasses OPAAuthManager's OPA check entirely (see
+    # auth_manager.py's _is_admin) — deliberate: an Airflow Dag run has no
+    # logged-in end-user attached to it for OPA to evaluate a grant
+    # against (see automl_wizard_pipeline.py's module docstring), so the
+    # backend's own /api/airflow/automl/run endpoint is where the real
+    # per-user "can this person trigger this Dag" OPA check happens
+    # instead, same resource/action OPAAuthManager itself would check.
+    AIRFLOW_API_USERNAME: svc-backend
+    AIRFLOW_API_PASSWORD: poc-airflow-api-password
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins
@@ -57,6 +84,10 @@ x-airflow-common:
     keycloak:
       condition: service_started
     mlflow:
+      condition: service_started
+    feast:
+      condition: service_started
+    feast-admin:
       condition: service_started
 
 services:
@@ -111,6 +142,62 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+
+  # Feature store — registry/online-store/offline-store all on the new
+  # `feast` Postgres database (see postgres/init/06-create-feast-db.sql),
+  # same "one instance, separate database" pattern as mlflow/airflow
+  # above. automl_wizard_pipeline's luu_tru_dac_trung task (step 5's
+  # parallel "store features" branch) writes into that database directly
+  # and calls this service's own HTTP API to materialize into the online
+  # store — see poc/feast/Dockerfile for why `feast apply` runs as this
+  # container's own startup step rather than a separate one-shot service.
+  feast:
+    build: ./feast
+    environment:
+      FEAST_DB_HOST: postgres
+    ports:
+      - "6566:6566"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Feast's own bundled registry browser (`feast ui`) — same image as
+  # `feast` above (no separate Dockerfile), command overridden to serve
+  # the UI instead of the feature server. Reads the identical Postgres SQL
+  # registry `feast` populates via `feast apply`, so it needs no apply
+  # step of its own — just depends_on feast so the registry has something
+  # in it by the time someone loads this. +grpcio in feast/Dockerfile is
+  # specifically for this command: `feast serve`/`feast apply` both ran
+  # fine without it, but `feast ui` fails at startup
+  # ("ModuleNotFoundError: No module named 'grpc'") without that extra.
+  feast-ui:
+    build: ./feast
+    command: ["feast", "ui", "-h", "0.0.0.0", "-p", "8888"]
+    environment:
+      FEAST_DB_HOST: postgres
+    ports:
+      - "8888:8888"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      feast:
+        condition: service_started
+
+  # The only thing in this stack with Feast SDK write access to the
+  # registry (see poc/feast/registry_api.py) — automl_wizard_pipeline's
+  # luu_tru_dac_trung task calls this over HTTP to create-or-update a
+  # feature view by name whenever a wizard user checks "save this
+  # transformation as a Feature View". Same image again, command
+  # overridden, not published to the host — internal-only, nothing
+  # outside this stack's own Airflow DAG ever needs to reach it.
+  feast-admin:
+    build: ./feast
+    command: ["python", "registry_api.py"]
+    environment:
+      FEAST_DB_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # Authentication service (see IDMA Authen & Authz.MD — "IDMA use Keycloak
   # as Authentication service"). Dev mode (KC_DB unset -> dev-file), no
@@ -232,6 +319,18 @@ services:
       # never talks to MinIO for this, same reasoning as the Airflow Dag.
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_DISABLE_AGENT_HINT: "1"
+      # Usecase tab (app/airflow_client.py): triggers/polls
+      # automl_wizard_pipeline runs via the apiserver's REST API, using
+      # the same svc-backend service account airflow-init creates (see
+      # docker-compose's airflow-common-env for why this is a local FAB
+      # login rather than the Keycloak OAuth flow the browser uses).
+      AIRFLOW_API_URL: http://airflow-apiserver:8080
+      AIRFLOW_API_USERNAME: svc-backend
+      AIRFLOW_API_PASSWORD: poc-airflow-api-password
+      # /api/wizard/features/online/{order_id} (app/feast_client.py): a
+      # look-up-only demo endpoint, closing the loop on whatever
+      # luu_tru_dac_trung last stored — never talks to Postgres directly.
+      FEAST_FEATURE_SERVER_URL: http://feast:6566
     ports:
       - "8001:8000"
     depends_on:
@@ -245,7 +344,11 @@ services:
         condition: service_completed_successfully
       keycloak:
         condition: service_started
+      airflow-init:
+        condition: service_completed_successfully
       mlflow:
+        condition: service_started
+      feast:
         condition: service_started
 
   frontend:
@@ -258,7 +361,14 @@ services:
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
-    command: ["-c", "airflow db migrate"]
+    # `airflow users create` exits non-zero if the user already exists —
+    # `|| true` makes re-running this container against an
+    # already-initialized database a no-op for that step, same
+    # idempotent-by-design spirit as minio/init.sh.
+    command: >-
+      -c "airflow db migrate &&
+      (airflow users create --username \"$$AIRFLOW_API_USERNAME\" --firstname svc --lastname backend
+      --email svc-backend@idma.local --role Admin --password \"$$AIRFLOW_API_PASSWORD\" || true)"
     restart: "no"
 
   airflow-apiserver:

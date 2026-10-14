@@ -13,11 +13,46 @@ spec:
     metadata:
       labels: {app: idma-postgres}
     spec:
+      securityContext:
+        # uid/gid 65534 ("nobody"), NOT the postgres image's own uid 70.
+        # Tested against this cluster's actual nfs-retain export: uid 70
+        # (with or without an explicit root initContainer chown first)
+        # reliably ends in "FATAL: data directory ... has wrong
+        # ownership" — this export's own uid-on-write behavior doesn't
+        # preserve an arbitrary non-root uid like 70, only literal root
+        # (confirmed separately) and, empirically, 65534: the OTHER
+        # Postgres already running on this exact StorageClass in this
+        # namespace (Helm release "postgres", pod postgres-0) runs as
+        # 65534 and its PVC data is genuinely owned 65534:65534 on disk
+        # (`ls -lan` confirmed) — i.e. 65534 is very likely this export's
+        # anonuid/squash target, so it's the one non-root uid guaranteed
+        # to round-trip consistently here. Matching it rather than the
+        # image's own uid is what actually makes this work.
+        runAsUser: 65534
+        runAsGroup: 65534
+        runAsNonRoot: true
       containers:
         - name: postgres
           image: postgres:16-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
           envFrom:
             - secretRef: {name: idma-postgres-secret}
+          env:
+            # Postgres creates+chmods(700) this subdirectory itself while
+            # already running as uid 65534 — always permitted, since it
+            # owns whatever it creates. Pointing PGDATA at the mount root
+            # instead would require chmod/chown *on the mount root*,
+            # which is owned by the nfs-retain provisioner, not by uid
+            # 65534 — exactly the "Permission denied... even at mode 777"
+            # failure the previous attempt hit (chmod/chown need
+            # ownership, not just write access; a 777 dir only grants the
+            # latter). Mirrors how the other Postgres already running in
+            # this namespace (Helm release "postgres", pod postgres-0,
+            # also on nfs-retain) lays out its own PVC: a world-writable
+            # provisioner-owned mount root containing a self-owned,
+            # self-chmodded data subdirectory.
+            - {name: PGDATA, value: "/var/lib/postgresql/data/pgdata"}
           ports:
             - containerPort: 5432
           volumeMounts:
@@ -40,23 +75,40 @@ spec:
             requests: {cpu: "100m", memory: "256Mi"}
             limits: {cpu: "500m", memory: "512Mi"}
       volumes:
-        # KNOWN LIMITATION, not yet fixed: emptyDir wipes authz/demo/
-        # airflow/mlflow on every pod restart (node drain, OOM, redeploy)
-        # — the init ConfigMap only runs `CREATE DATABASE`, not schema
-        # migrations, so a wipe silently breaks every DB-backed workload
-        # (Airflow scheduler, MLflow) until someone manually reruns their
-        # one-shot init Jobs. A PVC on the nfs-retain StorageClass was
-        # tried and reverted: non-root container processes get
-        # "Permission denied" against that export even at mode 777 (only
-        # literal root succeeds), which matches an SELinux container_t vs
-        # nfs_t denial — a node-level config issue outside what's fixable
-        # from this manifest. Needs a cluster/infra admin to check
-        # worker-node AVC denials (journalctl/ausearch) before retrying
-        # persistent storage here.
+        # Fixed (was emptyDir, which wiped authz/demo/airflow/mlflow data
+        # on every pod reschedule — the init ConfigMap only runs `CREATE
+        # DATABASE`, not schema migrations, so a wipe silently broke
+        # every DB-backed workload until someone manually reran their
+        # one-shot init Jobs; this is exactly what happened on
+        # 2026-10-09). A PVC on nfs-retain was tried once before (uid 70,
+        # the postgres image's own uid) and reverted for "Permission
+        # denied"/"wrong ownership" — this export only round-trips
+        # ownership correctly for literal root or uid 65534 (confirmed
+        # against the other, already-working Postgres in this namespace,
+        # pod postgres-0 — see the pod securityContext comment above);
+        # any other non-root uid's writes don't come back owned by that
+        # same uid. Running as 65534 against a self-owned PGDATA
+        # subdirectory is what actually works here. Reclaim policy "retain"
+        # (per the StorageClass name) means deleting this PVC does not
+        # delete the underlying NFS data — intentional, but means a
+        # genuine schema reset now needs an explicit PVC delete, not just
+        # a pod restart.
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim: {claimName: idma-postgres-data}
         - name: init-scripts
           configMap: {name: idma-postgres-init}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: idma-postgres-data
+  namespace: bigdata-dev
+  labels: {app: idma-postgres, app.kubernetes.io/part-of: idma-poc}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: nfs-retain
+  resources:
+    requests: {storage: 10Gi}
 ---
 apiVersion: v1
 kind: Service

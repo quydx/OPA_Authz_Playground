@@ -23,6 +23,39 @@ const modelInvokeForm = document.getElementById("model-invoke-form");
 const modelInvokeSelect = document.getElementById("model-invoke-select");
 const modelInvokeRows = document.getElementById("model-invoke-rows");
 const modelInvokeResult = document.getElementById("model-invoke-result");
+const wizStepper = document.getElementById("wiz-stepper");
+const wizCatalogTree = document.getElementById("wiz-catalog-tree");
+const wizSelectResult = document.getElementById("wiz-select-result");
+const wizPpTableWrap = document.getElementById("wiz-pp-table-wrap");
+const wizPpImputeStrategy = document.getElementById("wiz-pp-impute-strategy");
+const wizPpImputeValue = document.getElementById("wiz-pp-impute-value");
+const wizPpApplyBtn = document.getElementById("wiz-pp-apply-btn");
+const wizPreprocessResult = document.getElementById("wiz-preprocess-result");
+const wizTarget = document.getElementById("wiz-target");
+const wizFeatureColumns = document.getElementById("wiz-feature-columns");
+const wizTransformEncoding = document.getElementById("wiz-transform-encoding");
+const wizTransformScale = document.getElementById("wiz-transform-scale");
+const wizTransformLog = document.getElementById("wiz-transform-log");
+const wizDerivedName = document.getElementById("wiz-derived-name");
+const wizDerivedExpr = document.getElementById("wiz-derived-expr");
+const wizDerivedAddBtn = document.getElementById("wiz-derived-add-btn");
+const wizDerivedList = document.getElementById("wiz-derived-list");
+const wizFvSave = document.getElementById("wiz-fv-save");
+const wizFvName = document.getElementById("wiz-fv-name");
+const wizTfApplyBtn = document.getElementById("wiz-tf-apply-btn");
+const wizTfTableWrap = document.getElementById("wiz-tf-table-wrap");
+const wizFeaturesResult = document.getElementById("wiz-features-result");
+const wizModel = document.getElementById("wiz-model");
+const wizTestSize = document.getElementById("wiz-test-size");
+const wizNEstimators = document.getElementById("wiz-n-estimators");
+const wizMaxDepth = document.getElementById("wiz-max-depth");
+const wizMinScore = document.getElementById("wiz-min-score");
+const wizAutoPromote = document.getElementById("wiz-auto-promote");
+const wizResult = document.getElementById("wiz-result");
+const wizBackBtn = document.getElementById("wiz-back-btn");
+const wizNextBtn = document.getElementById("wiz-next-btn");
+const wizNavError = document.getElementById("wiz-nav-error");
+
 const airflowGrantForm = document.getElementById("airflow-grant-form");
 const airflowGrantSub = document.getElementById("airflow-grant-sub");
 const airflowGrantObj = document.getElementById("airflow-grant-obj");
@@ -87,6 +120,8 @@ const DEFAULT_SERVICES = [
   { name: "MinIO Console", port: 9001, path: "/", desc: "browser UI" },
   { name: "OPA", port: 8181, path: "/health", desc: "policy engine" },
   { name: "MLflow", port: 5000, path: "/", desc: "tracking server UI + Model Registry" },
+  { name: "Feast API", port: 6566, path: "/health", desc: "feature server — get-online-features / materialize-incremental REST API" },
+  { name: "Feast UI", port: 8888, path: "/", desc: "registry browser — feature views, entities, data sources, lineage" },
   { name: "Postgres", port: 5433, desc: "authz · demo · airflow DBs", tcp: true },
 ];
 
@@ -119,6 +154,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.getElementById("tab-airflow").hidden = btn.dataset.tab !== "airflow";
     document.getElementById("tab-policies").hidden = btn.dataset.tab !== "policies";
     document.getElementById("tab-models").hidden = btn.dataset.tab !== "models";
+    document.getElementById("tab-usecase").hidden = btn.dataset.tab !== "usecase";
     document.getElementById("tab-storage").hidden = btn.dataset.tab !== "storage";
     document.getElementById("tab-users").hidden = btn.dataset.tab !== "users";
     document.getElementById("tab-architecture").hidden = btn.dataset.tab !== "architecture";
@@ -139,6 +175,9 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     }
     if (btn.dataset.tab === "models") {
       loadModels();
+    }
+    if (btn.dataset.tab === "usecase") {
+      initWizard();
     }
     if (btn.dataset.tab === "storage") {
       loadStorageFiles();
@@ -389,6 +428,580 @@ async function deployModelVersion(name, version) {
     modelInvokeResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
   }
 }
+
+// ---------------------------------------------------------------------
+// Usecase tab — a 7-step wizard mirroring automl_wizard_pipeline.py's
+// own step names (chọn bài toán -> kết nối & chọn dữ liệu -> tiền xử lý
+// -> chọn mục tiêu -> biến đổi & tạo biến -> cấu hình & chạy -> kết
+// quả). ("Chọn dữ liệu" and "Làm sạch" used to be their own steps —
+// picking a table and fetching its rows was always one decision, so
+// step 2 below does both inline; dropping null/duplicate rows is now a
+// fixed, automatic part of that same fetch rather than a separate
+// screen.) Step 2 reuses /api/catalog and /api/query verbatim — the
+// same OPA+Trino path the Data Catalog tab uses above, a real per-user
+// authz check rather than a bypass. Steps 3 and 5 call the stateless
+// preview endpoints (/api/wizard/preprocess, /api/wizard/transform)
+// that mirror the Dag's own task logic. Only step 6 ever triggers
+// Airflow; the Dag re-derives everything itself from Postgres at that
+// point regardless of what these previews showed (see the Dag's own
+// module docstring).
+//
+// `wizState` is the wizard's only source of truth — Back/Next just shows
+// a different step panel and (via showWizStep -> wizOnEnter) re-runs
+// that step's own live preview; nothing is resubmitted on Back.
+// ---------------------------------------------------------------------
+const WIZ_STEP_LABELS = [
+  "Chọn bài toán", "Kết nối & chọn dữ liệu",
+  "Tiền xử lý", "Chọn mục tiêu", "Biến đổi & tạo biến", "Cấu hình & chạy", "Kết quả",
+];
+
+const wizState = {
+  step: 1,
+  problemType: "classification",
+  schema: null,
+  table: null,
+  columns: null,
+  rows: null,
+  // { colName: "numeric"|"datetime"|"normalize"|"impute" } — picked from a
+  // dropdown in that column's own header, not typed, so there's nothing to
+  // misspell/forget. One operation per column (impute's mean/median
+  // strategy already coerces to numeric internally, so a column rarely
+  // needs both numeric-cast and impute at once).
+  preprocessColOps: {},
+  preprocessedColumns: null,
+  preprocessedRows: null,
+  targetColumn: null,
+  featureColumns: "",
+  derivedColumns: [], // [{name, expression}] — expression is run as real SQL via DuckDB
+  featureNames: null,
+  transformPreviewColumns: null,
+  transformPreviewRows: null,
+  options: null, // {classification_models, regression_models}
+  dagRunId: null,
+};
+let wizInitialized = false;
+
+function initWizard() {
+  if (wizInitialized) return; // keep wherever the user left off on re-visits
+  wizInitialized = true;
+  renderWizDerivedList();
+  showWizStep(1);
+}
+
+function renderWizStepper() {
+  wizStepper.innerHTML = WIZ_STEP_LABELS.map((label, i) => {
+    const n = i + 1;
+    const cls = n < wizState.step ? "done" : n === wizState.step ? "current" : "";
+    return `<span class="wiz-step-tag ${cls}"><span class="n">${n}</span>${label}</span>`;
+  }).join("");
+}
+
+async function wizOnEnter(n) {
+  try {
+    if (n === 2) await loadWizCatalog();
+    if (n === 3) renderWizPpTable();
+    if (n === 4) populateWizTarget();
+    if (n === 5) {
+      if (!wizState.featureNames) wizFeaturesResult.innerHTML = `<p class="result-empty">Not applied yet — click Apply transformations.</p>`;
+      renderWizTfTable();
+    }
+    if (n === 6) {
+      await loadWizOptions();
+      populateWizModel();
+    }
+  } catch (err) {
+    wizError(err.message);
+  }
+}
+
+function showWizStep(n) {
+  wizState.step = n;
+  for (let i = 1; i <= 7; i++) {
+    document.getElementById(`wiz-step-${i}`).hidden = i !== n;
+  }
+  wizBackBtn.disabled = n === 1;
+  wizNextBtn.textContent = n === 7 ? "Start over" : n === 6 ? "Run pipeline →" : "Next →";
+  wizNavError.hidden = true;
+  renderWizStepper();
+  wizOnEnter(n);
+}
+
+function wizError(msg) {
+  wizNavError.textContent = msg;
+  wizNavError.hidden = false;
+}
+
+// Step 2 — connect & select data: identical to the Data Catalog tab's
+// own loadCatalog(), rendered into the wizard's own tree; clicking a row
+// immediately fetches it via wizSelectData() below and shows the preview
+// inline on this same step. A denied table is still clickable — same as
+// the Data Catalog tab — so the real OPA denial renders live rather than
+// silently filtering it out of reach here.
+async function loadWizCatalog() {
+  const tree = await api("/api/catalog");
+  wizCatalogTree.innerHTML = tree
+    .map((schema) => {
+      const rows = schema.tables
+        .map(
+          (t) => `
+        <div class="table-row ${schema.name === wizState.schema && t.name === wizState.table ? "selected" : ""}"
+             data-schema="${schema.name}" data-table="${t.name}">
+          <span class="name">${t.name}</span>
+          <span class="status-dot ${t.allowed ? "allow" : "deny"}" title="${t.allowed ? "allowed" : "denied"}"></span>
+        </div>`
+        )
+        .join("");
+      return `
+        <div class="schema-block">
+          <div class="schema-head">
+            <span>${schema.name} <span class="org-chip" title="belongs to ${schema.org_label}">${schema.org}</span></span>
+            <span class="status-dot ${schema.allowed ? "allow" : "deny"}"></span>
+          </div>
+          ${rows}
+        </div>`;
+    })
+    .join("");
+
+  wizCatalogTree.querySelectorAll(".table-row").forEach((row) => {
+    row.addEventListener("click", async () => {
+      wizCatalogTree.querySelectorAll(".table-row").forEach((r) => r.classList.remove("selected"));
+      row.classList.add("selected");
+      wizState.schema = row.dataset.schema;
+      wizState.table = row.dataset.table;
+      try {
+        await wizSelectData();
+      } catch (err) {
+        wizError(err.message);
+      }
+    });
+  });
+}
+
+// Step 2 (continued) — select data: reuses /api/query verbatim, same
+// response shape the Data Catalog tab's runQuery()/renderResult()
+// already handle. Rows with any null, and exact-duplicate rows, are not
+// dropped here in the preview — that happens automatically inside the
+// Dag's own connect_and_select_data() task at run time, same as before.
+async function wizSelectData() {
+  wizSelectResult.innerHTML = `<p class="result-empty">Running…</p>`;
+  const res = await api("/api/query", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resource: `${wizState.schema}.${wizState.table}` }),
+  });
+  if (!res.allowed) {
+    // Cleared, not left stale — otherwise a prior successful selection
+    // would let this step's Next wrongly pass after a later denied pick.
+    wizState.columns = null;
+    wizState.rows = null;
+    wizSelectResult.innerHTML = `<div class="result-decision deny">✕ OPA denied select on '${wizState.schema}.${wizState.table}' — ${res.message}</div>`;
+    return false;
+  }
+  wizState.columns = res.columns;
+  wizState.rows = res.rows;
+  const cols = res.columns.map((c) => `<th>${c}</th>`).join("");
+  const rows = res.rows.map((r) => `<tr>${r.map((v) => `<td>${v === null ? "<i>null</i>" : v}</td>`).join("")}</tr>`).join("");
+  wizSelectResult.innerHTML = `
+    <div class="result-decision allow">${wizState.schema}.${wizState.table} — ${res.rows.length} rows, ${res.columns.length} columns</div>
+    <div class="result-table-wrap"><table class="data-table"><thead><tr>${cols}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  return true;
+}
+
+// Step 3 — preprocess: pick one operation per column from a dropdown in
+// that column's own header (nothing to type/misspell), then hit Apply.
+// Nothing is sent to /api/wizard/preprocess until Apply is clicked — same
+// logic as the Dag's own preprocess_data() task once it runs.
+const WIZ_PP_OPS = [
+  { value: "", label: "—" },
+  { value: "numeric", label: "Cast numeric" },
+  { value: "datetime", label: "Cast datetime" },
+  { value: "normalize", label: "Normalize" },
+  { value: "impute", label: "Impute nulls" },
+];
+
+function renderWizPpTable() {
+  if (!wizState.columns) return;
+  const previewRows = (wizState.preprocessedRows || wizState.rows).slice(0, 10);
+  const headCells = wizState.columns
+    .map((c) => {
+      const current = wizState.preprocessColOps[c] || "";
+      const options = WIZ_PP_OPS.map(
+        (o) => `<option value="${o.value}" ${o.value === current ? "selected" : ""}>${o.label}</option>`
+      ).join("");
+      return `<th><span class="pp-col-name">${c}</span><select class="pp-col-op" data-col="${c}">${options}</select></th>`;
+    })
+    .join("");
+  const bodyRows = previewRows
+    .map((r) => `<tr>${r.map((v) => `<td>${v === null ? "<i>null</i>" : v}</td>`).join("")}</tr>`)
+    .join("");
+  wizPpTableWrap.innerHTML = `<table class="data-table"><thead><tr>${headCells}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+
+  wizPpTableWrap.querySelectorAll("select.pp-col-op").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const col = sel.dataset.col;
+      if (sel.value) wizState.preprocessColOps[col] = sel.value;
+      else delete wizState.preprocessColOps[col];
+      wizInvalidatePreprocess();
+    });
+  });
+}
+
+// Any config change after a successful Apply invalidates the previous
+// result — Next is gated on preprocessedColumns, so a stale "applied"
+// preview can never silently carry into later steps once the config
+// underneath it has changed.
+function wizInvalidatePreprocess() {
+  wizState.preprocessedColumns = null;
+  wizState.preprocessedRows = null;
+  wizPreprocessResult.innerHTML = `<p class="result-empty">Not applied yet — click Apply transformations.</p>`;
+}
+wizPpImputeStrategy.addEventListener("change", wizInvalidatePreprocess);
+wizPpImputeValue.addEventListener("change", wizInvalidatePreprocess);
+
+function wizPpColsByOp(op) {
+  return Object.keys(wizState.preprocessColOps).filter((c) => wizState.preprocessColOps[c] === op);
+}
+
+async function wizApplyPreprocess() {
+  if (!wizState.columns) return false;
+  const byOp = wizPpColsByOp;
+  wizPreprocessResult.innerHTML = `<p class="result-empty">Running…</p>`;
+  try {
+    const res = await api("/api/wizard/preprocess", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        columns: wizState.columns,
+        rows: wizState.rows,
+        numeric_columns: byOp("numeric"),
+        datetime_columns: byOp("datetime"),
+        normalize_columns: byOp("normalize"),
+        impute_columns: byOp("impute"),
+        impute_strategy: wizPpImputeStrategy.value,
+        impute_value: wizPpImputeValue.value || null,
+      }),
+    });
+    wizState.preprocessedColumns = res.columns;
+    wizState.preprocessedRows = res.rows;
+    wizPreprocessResult.innerHTML = `<div class="result-decision allow">${res.before_null_count} → ${res.after_null_count} null values${res.coerced_errors ? `, ${res.coerced_errors} value(s) failed type coercion` : ""}</div>`;
+    renderWizPpTable(); // refresh the preview body with the transformed rows
+    return true;
+  } catch (err) {
+    wizState.preprocessedColumns = null;
+    wizState.preprocessedRows = null;
+    wizPreprocessResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
+    return false;
+  }
+}
+wizPpApplyBtn.addEventListener("click", wizApplyPreprocess);
+
+// Step 4 — select target: populated from the real columns the preceding
+// steps produced, not a static cross-table union.
+function populateWizTarget() {
+  const cols = wizState.preprocessedColumns || wizState.columns || [];
+  wizState.targetColumn = cols.includes(wizState.targetColumn) ? wizState.targetColumn : cols[0] || null;
+  wizTarget.innerHTML = cols.map((c) => `<option value="${c}" ${c === wizState.targetColumn ? "selected" : ""}>${c}</option>`).join("");
+}
+wizTarget.addEventListener("change", () => {
+  wizState.targetColumn = wizTarget.value;
+});
+
+// Step 5 — transform & create features: add SQL-expression derived
+// columns, set the options, then hit Apply — nothing is sent to
+// /api/wizard/transform until Apply is clicked, same invalidate-on-change
+// pattern as step 3's preprocess table. Mirrors the Dag's own
+// transform_and_create_features() task.
+function renderWizDerivedList() {
+  wizDerivedList.innerHTML = wizState.derivedColumns
+    .map((d, i) => `<span class="perm-chip allow">${d.name} = ${d.expression} <a href="#" data-i="${i}" class="wiz-derived-remove">✕</a></span>`)
+    .join("");
+  wizDerivedList.querySelectorAll(".wiz-derived-remove").forEach((a) => {
+    a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      wizState.derivedColumns.splice(Number(a.dataset.i), 1);
+      renderWizDerivedList();
+      wizInvalidateTransform();
+    });
+  });
+}
+wizDerivedAddBtn.addEventListener("click", () => {
+  const name = wizDerivedName.value.trim();
+  const expression = wizDerivedExpr.value.trim();
+  if (!name || !expression) {
+    wizError("Derived column needs a name and a SQL expression.");
+    return;
+  }
+  wizState.derivedColumns.push({ name, expression });
+  wizDerivedName.value = "";
+  wizDerivedExpr.value = "";
+  renderWizDerivedList();
+  wizInvalidateTransform();
+});
+
+// Shows the Apply result once there is one; otherwise falls back to the
+// raw preprocessed data (step 3's output) so there's always something to
+// look at, same as step 3 itself shows the raw query result immediately.
+function renderWizTfTable() {
+  const cols = wizState.transformPreviewColumns || wizState.preprocessedColumns || wizState.columns;
+  const rowsSource = wizState.transformPreviewRows || wizState.preprocessedRows || wizState.rows;
+  if (!cols) {
+    wizTfTableWrap.innerHTML = "";
+    return;
+  }
+  const headCells = cols.map((c) => `<th>${c}</th>`).join("");
+  const bodyRows = (rowsSource || [])
+    .slice(0, 10)
+    .map((r) => `<tr>${r.map((v) => `<td>${v === null ? "<i>null</i>" : v}</td>`).join("")}</tr>`)
+    .join("");
+  wizTfTableWrap.innerHTML = `<table class="data-table"><thead><tr>${headCells}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+}
+
+// Any config change after a successful Apply invalidates the previous
+// result — Next is gated on featureNames, same reasoning as step 3's
+// wizInvalidatePreprocess().
+function wizInvalidateTransform() {
+  wizState.featureNames = null;
+  wizState.transformPreviewColumns = null;
+  wizState.transformPreviewRows = null;
+  wizFeaturesResult.innerHTML = `<p class="result-empty">Not applied yet — click Apply transformations.</p>`;
+  renderWizTfTable();
+}
+wizFeatureColumns.addEventListener("change", wizInvalidateTransform);
+wizTransformEncoding.addEventListener("change", wizInvalidateTransform);
+wizTransformScale.addEventListener("change", wizInvalidateTransform);
+wizTransformLog.addEventListener("change", wizInvalidateTransform);
+
+async function wizApplyTransform() {
+  wizState.featureColumns = wizFeatureColumns.value.trim();
+  wizFeaturesResult.innerHTML = `<p class="result-empty">Running…</p>`;
+  try {
+    const res = await api("/api/wizard/transform", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        columns: wizState.preprocessedColumns,
+        rows: wizState.preprocessedRows,
+        target_column: wizState.targetColumn,
+        feature_columns: wizState.featureColumns || null,
+        encoding: wizTransformEncoding.value,
+        scale: wizTransformScale.value,
+        log_columns: wizTransformLog.value || null,
+        derived: wizState.derivedColumns,
+      }),
+    });
+    wizState.featureNames = res.feature_names;
+    wizState.transformPreviewColumns = res.columns;
+    wizState.transformPreviewRows = res.preview_rows;
+    wizFeaturesResult.innerHTML = `<div class="perm-chips">${res.feature_names.map((f) => `<span class="perm-chip allow">${f}</span>`).join("")}</div>`;
+    renderWizTfTable();
+    return true;
+  } catch (err) {
+    wizState.featureNames = null;
+    wizState.transformPreviewColumns = null;
+    wizState.transformPreviewRows = null;
+    wizFeaturesResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
+    renderWizTfTable();
+    return false;
+  }
+}
+wizTfApplyBtn.addEventListener("click", wizApplyTransform);
+wizFvSave.addEventListener("change", () => {
+  wizFvName.disabled = !wizFvSave.checked;
+  if (!wizFvSave.checked) wizFvName.value = "";
+});
+
+// Step 6 — configure & run.
+async function loadWizOptions() {
+  if (wizState.options) return; // static for the lifetime of the page
+  wizState.options = await api("/api/wizard/options");
+}
+function populateWizModel() {
+  const models = wizState.options[`${wizState.problemType}_models`];
+  wizModel.innerHTML = models.map((m) => `<option value="${m}">${m}</option>`).join("");
+}
+
+async function wizRun() {
+  // Same identifier pattern the backend/DAG/registry_api all validate
+  // against — checked here too so a bad name fails fast instead of
+  // wasting a DAG run that only fails once it reaches idma-feast-admin.
+  if (wizFvSave.checked && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(wizFvName.value)) {
+    wizResult.innerHTML = `<div class="result-decision deny">✕ Feature view name must be letters/digits/underscore, not starting with a digit.</div>`;
+    return false;
+  }
+  wizResult.innerHTML = `<p class="result-empty">Triggering…</p>`;
+  const body = {
+    problem_type: wizState.problemType,
+    schema_: wizState.schema,
+    table: wizState.table,
+    preprocess_numeric_columns: wizPpColsByOp("numeric").join(",") || null,
+    preprocess_datetime_columns: wizPpColsByOp("datetime").join(",") || null,
+    preprocess_normalize_columns: wizPpColsByOp("normalize").join(",") || null,
+    preprocess_impute_columns: wizPpColsByOp("impute").join(",") || null,
+    preprocess_impute_strategy: wizPpImputeStrategy.value,
+    preprocess_impute_value: wizPpImputeValue.value || null,
+    target_column: wizState.targetColumn,
+    feature_columns: wizState.featureColumns || null,
+    transform_encoding: wizTransformEncoding.value,
+    transform_scale: wizTransformScale.value,
+    transform_log_columns: wizTransformLog.value || null,
+    transform_derived: wizState.derivedColumns,
+    feature_view_save: wizFvSave.checked,
+    feature_view_name: wizFvSave.checked ? wizFvName.value : null,
+    model_type: wizModel.value,
+    test_size: Number(wizTestSize.value),
+    n_estimators: Number(wizNEstimators.value),
+    max_depth: Number(wizMaxDepth.value),
+    min_score: Number(wizMinScore.value),
+    auto_promote: wizAutoPromote.checked,
+  };
+  try {
+    const run = await api("/api/wizard/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    wizState.dagRunId = run.dag_run_id;
+    renderWizRunning(run.dag_run_id, run.state);
+    setTimeout(() => pollWizRun(run.dag_run_id), 2000);
+    return true;
+  } catch (err) {
+    wizResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
+    return false;
+  }
+}
+
+// Step 7 — results: same polling shape the Models tab's deploy flow and
+// the original single-form wizard used.
+function renderWizRunning(dagRunId, state) {
+  wizResult.innerHTML = `<p class="result-empty">Run <span class="mono">${dagRunId}</span> — state: <b>${state}</b>…</p>`;
+}
+
+function renderWizDone(payload) {
+  const { state, result } = payload;
+  if (state !== "success" || !result) {
+    wizResult.innerHTML = `<div class="result-decision deny">✕ Dag run ended with state: ${state}</div>`;
+    return;
+  }
+  const metricChips = Object.entries(result.metrics)
+    .map(([k, v]) => `<span class="perm-chip allow">${k}=${Number(v).toFixed(4)}</span>`)
+    .join("");
+  // result.feast is a best-effort add-on (see backend's wizard_run_status) —
+  // luu_tru_dac_trung runs in parallel with the training branch this
+  // result mostly describes, so it may not have landed on this exact
+  // poll yet; absent just means "not shown this time", not an error.
+  const feastLine = !result.feast
+    ? ""
+    : result.feast.skipped
+      ? `<div class="hint">Feature store: skipped (not sales.orders)</div>`
+      : `<div class="hint">Feature store: ${result.feast.written_rows} row(s) stored to '${result.feast.feature_view}'</div>`;
+  wizResult.innerHTML = `
+    <div class="result-decision ${result.registered ? "allow" : "deny"}">
+      ${result.registered ? `Registered '${result.name}' v${result.version}${result.promoted ? " — promoted to production" : ""}` : `score ${result.score.toFixed(4)} below min_score — not registered`}
+    </div>
+    <div class="perm-chips">${metricChips}</div>
+    ${feastLine}`;
+}
+
+async function pollWizRun(dagRunId, feastGraceLeft = 3) {
+  let payload;
+  try {
+    payload = await api(`/api/wizard/run/${encodeURIComponent(dagRunId)}`);
+  } catch (err) {
+    wizResult.innerHTML = `<div class="result-decision deny">✕ ${err.message}</div>`;
+    return;
+  }
+  if (payload.state === "queued" || payload.state === "running") {
+    renderWizRunning(dagRunId, payload.state);
+    setTimeout(() => pollWizRun(dagRunId), 2500);
+    return;
+  }
+  // luu_tru_dac_trung runs in parallel with the training branch ket_qua
+  // reports on (see backend's wizard_run_status) — it occasionally
+  // hasn't finished its materialize call yet on the exact poll where
+  // state first flips to "success". A few extra short polls catch that
+  // without holding up the common case (feast already present) or
+  // waiting forever on a genuinely skipped/failed feature-store branch.
+  if (payload.state === "success" && payload.result && !payload.result.feast && feastGraceLeft > 0) {
+    setTimeout(() => pollWizRun(dagRunId, feastGraceLeft - 1), 2000);
+    return;
+  }
+  renderWizDone(payload);
+}
+
+function resetWizard() {
+  wizState.schema = null;
+  wizState.table = null;
+  wizState.columns = null;
+  wizState.rows = null;
+  wizState.preprocessColOps = {};
+  wizState.preprocessedColumns = null;
+  wizState.preprocessedRows = null;
+  wizState.targetColumn = null;
+  wizState.featureColumns = "";
+  wizState.derivedColumns = [];
+  wizState.featureNames = null;
+  wizState.transformPreviewColumns = null;
+  wizState.transformPreviewRows = null;
+  wizState.dagRunId = null;
+  wizFeatureColumns.value = "";
+  wizPpImputeValue.value = "";
+  wizTransformLog.value = "";
+  wizFvSave.checked = false;
+  wizFvName.value = "";
+  wizFvName.disabled = true;
+  wizSelectResult.innerHTML = `<p class="result-empty">Pick a table above.</p>`;
+  wizPreprocessResult.innerHTML = "";
+  wizFeaturesResult.innerHTML = "";
+  wizTfTableWrap.innerHTML = "";
+  renderWizDerivedList();
+  wizResult.innerHTML = "—";
+  showWizStep(1);
+}
+
+wizNextBtn.addEventListener("click", async () => {
+  const step = wizState.step;
+  wizNavError.hidden = true;
+  wizNextBtn.disabled = true;
+  try {
+    if (step === 1) {
+      wizState.problemType = document.querySelector('input[name="wiz-problem-type"]:checked').value;
+      showWizStep(2);
+    } else if (step === 2) {
+      if (!wizState.columns) {
+        wizError("Pick an allowed table and let it load first.");
+        return;
+      }
+      showWizStep(3);
+    } else if (step === 3) {
+      if (!wizState.preprocessedColumns) {
+        wizError("Click Apply transformations first (or fix the error shown above it).");
+        return;
+      }
+      showWizStep(4);
+    } else if (step === 4) {
+      wizState.targetColumn = wizTarget.value;
+      showWizStep(5);
+    } else if (step === 5) {
+      if (!wizState.featureNames || !wizState.featureNames.length) {
+        wizError("Click Apply transformations first (or fix the error shown above it).");
+        return;
+      }
+      showWizStep(6);
+    } else if (step === 6) {
+      if (await wizRun()) showWizStep(7);
+    } else if (step === 7) {
+      resetWizard();
+    }
+  } catch (err) {
+    wizError(err.message);
+  } finally {
+    wizNextBtn.disabled = false;
+  }
+});
+
+wizBackBtn.addEventListener("click", () => {
+  if (wizState.step > 1) showWizStep(wizState.step - 1);
+});
 
 // ---------------------------------------------------------------------
 // Storage tab

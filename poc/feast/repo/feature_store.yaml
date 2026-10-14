@@ -1,0 +1,38 @@
+# Registry + online store + offline store all on the one shared Postgres
+# instance (the new `feast` database — see poc/postgres/init/06-create-feast-db.sql
+# / 00-configmap-postgres-init.yaml's matching key), same "pile everything
+# onto idma-postgres" pattern as authz/airflow/mlflow in this repo, rather
+# than a separate Redis/file store for just one of registry/online/offline.
+#
+# Feast expands $VAR/${VAR} here via os.path.expandvars at load time (see
+# feast/repo_config.py's load_repo_config) — FEAST_DB_HOST is the one value
+# that actually differs between docker-compose ("postgres") and k8s
+# ("idma-postgres"), same reasoning as every other service's hostname env
+# var in this repo. user/password/database are hardcoded plaintext, same
+# as every other init script/compose env block here — this is a lab/demo
+# stack, not a real credential boundary.
+project: idma_automl
+provider: local
+registry:
+    registry_type: sql
+    path: postgresql+psycopg://poc:pocpass@${FEAST_DB_HOST}:5432/feast
+    cache_ttl_seconds: 60
+online_store:
+    type: postgres
+    host: ${FEAST_DB_HOST}
+    port: 5432
+    database: feast
+    db_schema: public
+    user: poc
+    password: pocpass
+    sslmode: disable
+offline_store:
+    type: postgres
+    host: ${FEAST_DB_HOST}
+    port: 5432
+    database: feast
+    db_schema: public
+    user: poc
+    password: pocpass
+    sslmode: disable
+entity_key_serialization_version: 3

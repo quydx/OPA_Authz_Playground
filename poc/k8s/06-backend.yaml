@@ -73,6 +73,18 @@ spec:
             # never needs its own MinIO credentials for this.
             - {name: MLFLOW_TRACKING_URI, value: "http://idma-mlflow:5000"}
             - {name: MLFLOW_DISABLE_AGENT_HINT, value: "1"}
+            # Usecase tab (app/airflow_client.py) — triggers/polls
+            # automl_wizard_pipeline runs via the apiserver's REST API,
+            # authenticating as the local FAB service account
+            # idma-airflow-init creates (see 08-airflow.yaml).
+            - {name: AIRFLOW_API_URL, value: "http://idma-airflow-apiserver:8080"}
+            - {name: AIRFLOW_API_USERNAME, value: "svc-backend"}
+            - {name: AIRFLOW_API_PASSWORD, value: "poc-airflow-api-password"}
+            # /api/wizard/features/online/{order_id} (app/feast_client.py):
+            # a look-up-only demo endpoint, closing the loop on whatever
+            # luu_tru_dac_trung last stored — never talks to Postgres
+            # directly.
+            - {name: FEAST_FEATURE_SERVER_URL, value: "http://idma-feast:6566"}
             # Keycloak (see 10-keycloak.yaml). JWKS/admin-API calls are
             # server-to-server, so they use the stable in-cluster Service
             # DNS name regardless of which node a browser used. ISSUER is

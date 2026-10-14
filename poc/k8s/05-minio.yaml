@@ -38,8 +38,30 @@ spec:
             requests: {cpu: "100m", memory: "256Mi"}
             limits: {cpu: "500m", memory: "512Mi"}
       volumes:
+        # Fixed (was emptyDir, which wiped every bucket/IAM user — org-001,
+        # org-002, mlflow-artifacts, mlflowsvc/org001svc/org002svc — on
+        # every pod reschedule; verified this actually happened on
+        # 2026-10-13, which then hung the AutoML wizard's model-training
+        # task indefinitely retrying an upload against a since-deleted
+        # mlflowsvc credential). Unlike idma-postgres (see that Deployment's
+        # own comment), no uid dance needed here: this container already
+        # runs as root by default (confirmed via `kubectl exec ... id`),
+        # and root is the one identity already confirmed to round-trip
+        # ownership correctly against this cluster's nfs-retain export.
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim: {claimName: idma-minio-data}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: idma-minio-data
+  namespace: bigdata-dev
+  labels: {app: idma-minio, app.kubernetes.io/part-of: idma-poc}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: nfs-retain
+  resources:
+    requests: {storage: 10Gi}
 ---
 apiVersion: v1
 kind: Service

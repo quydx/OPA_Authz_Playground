@@ -73,6 +73,7 @@ _ACTION_MAP = {
     ("GET", None): "view",
     ("POST", None): "edit",
     ("PUT", None): "edit",
+    ("PATCH", None): "edit",
     ("DELETE", None): "delete",
     ("GET", DagAccessEntity.RUN): "view",
     ("POST", DagAccessEntity.RUN): "trigger",
